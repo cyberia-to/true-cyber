@@ -1,0 +1,26 @@
+# ---
+# tags: cyber, cli, config
+# crystal-type: source
+# crystal-domain: cyber
+# ---
+# true-cyber — the bootstrap face of the cyber stack. `cargo install true-cyber`
+# puts `cyber` on PATH; `cyber install --all` turns a bare machine into a
+# working cyber system built from source.
+[package]
+name = "true-cyber"
+version = "0.1.0"
+edition = "2021"
+description = "cyber — bootstrap the cyber stack: sync the repos, build the toolset from source, run every tool by name"
+license-file = "LICENSE"
+repository = "https://github.com/cyberia-to/true-cyber"
+keywords = ["cyber", "cybergraph", "soft3", "toolchain", "bootstrap"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.74"
+
+[[bin]]
+name = "cyber"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

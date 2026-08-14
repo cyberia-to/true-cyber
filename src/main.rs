@@ -3,21 +3,14 @@
 // crystal-type: source
 // crystal-domain: cyber
 // ---
-//! cyber — thin product CLI for spacepussy-test.
+//! cyber — product face of the soft3 chaosnet (spacepussy-test).
 //!
-//! ```text
-//! cargo install true-cyber
-//! cyber sync
-//! ```
-//!
-//! Crate name is `true-cyber` (crates.io `cyber` is taken). Binary is `cyber`.
-//! Intentionally has no soft3/cyb dependency — install stays small and works on
-//! rustc 1.74+.
+//! The network is soft3 (`soft3 node` = cybergraph+bbg). This binary is the
+//! thin product client: install stays light; the stack runs on the node.
 
 use std::env;
 use std::process;
 
-/// Public spacepussy-test edge (cybernode / cyberproxy).
 const DEFAULT_RPC: &str = "https://cyb.ai/spacepussy-test";
 const CHAIN_ID: &str = "spacepussy-test";
 
@@ -26,22 +19,35 @@ fn main() {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
 
     match cmd {
-        "" | "status" => cmd_status(),
+        "" | "status" => {
+            println!(
+                "cyber {}  ·  {CHAIN_ID}  ·  soft3 chaosnet",
+                env!("CARGO_PKG_VERSION")
+            );
+            println!("  rpc  {DEFAULT_RPC}");
+            println!("  run  cyber sync");
+            println!("  node soft3 node   # run the stack locally");
+        }
         "sync" => cmd_sync(rpc_from_args(&args[1..])),
-        "network" | "net" => cmd_network(),
+        "network" | "net" => {
+            println!("network {CHAIN_ID}");
+            println!("  role     soft3 chaosnet (cybergraph+bbg)");
+            println!("  rpc      {DEFAULT_RPC}");
+            println!("  status   {DEFAULT_RPC}/status");
+            println!("  denom    testpussy");
+            println!("  node     soft3 node --bind 127.0.0.1:7780");
+        }
         "help" | "--help" | "-h" | "?" => print_help(),
         "version" | "--version" | "-V" => {
             println!(
-                "cyber {} (true-cyber) · network {}",
-                env!("CARGO_PKG_VERSION"),
-                CHAIN_ID
+                "cyber {} (true-cyber) · soft3 network {CHAIN_ID}",
+                env!("CARGO_PKG_VERSION")
             );
         }
-        // go-cyber style subcommands → clear redirect
         "query" | "tx" | "keys" | "start" | "tendermint" => {
-            eprintln!("this is true-cyber (product CLI), not the cosmos go-cyber daemon.");
-            eprintln!("  product:  cyber sync          # spacepussy-test");
-            eprintln!("  chain:    go-cyber / pussy     # bostrom · space-pussy bootloader");
+            eprintln!("this is true-cyber (soft3 product face), not cosmos go-cyber.");
+            eprintln!("  cyber sync          # spacepussy-test");
+            eprintln!("  soft3 node          # run soft3 stack node");
             process::exit(2);
         }
         other => {
@@ -63,16 +69,12 @@ fn rpc_from_args(args: &[String]) -> String {
         } else if args[i] == "--network" || args[i] == "-n" {
             i += 1;
             let name = args.get(i).map(|s| s.as_str()).unwrap_or("");
-            if is_bootloader(name) {
-                eprintln!("`{name}` is a cosmos bootloader chain — not spacepussy-test.");
-                eprintln!("product: {CHAIN_ID} @ {DEFAULT_RPC}");
-                process::exit(2);
-            }
-            if !matches!(
+            if matches!(
                 name,
-                "spacepussy-test" | "test" | "soft3" | "sptest" | "default" | ""
+                "space-pussy" | "spacepussy" | "pussy" | "sp" | "bostrom" | "boot"
             ) {
-                eprintln!("unknown network `{name}` (use spacepussy-test)");
+                eprintln!("`{name}` is cosmos bootloader — not soft3 spacepussy-test.");
+                eprintln!("product: {CHAIN_ID} @ {DEFAULT_RPC}");
                 process::exit(2);
             }
         }
@@ -81,38 +83,16 @@ fn rpc_from_args(args: &[String]) -> String {
     rpc
 }
 
-fn is_bootloader(s: &str) -> bool {
-    matches!(
-        s.trim().to_ascii_lowercase().as_str(),
-        "space-pussy" | "spacepussy" | "pussy" | "sp" | "bostrom" | "boot"
-    )
-}
-
-fn cmd_status() {
-    println!("cyber {}  ·  {CHAIN_ID}", env!("CARGO_PKG_VERSION"));
-    println!("  rpc  {DEFAULT_RPC}");
-    println!("  run  cyber sync");
-}
-
-fn cmd_network() {
-    println!("network {CHAIN_ID}");
-    println!("  role     soft3 chaosnet (product default)");
-    println!("  rpc      {DEFAULT_RPC}");
-    println!("  status   {DEFAULT_RPC}/status");
-    println!("  health   {DEFAULT_RPC}/health");
-    println!("  denom    testpussy");
-    println!("  prefix   pussy");
-    println!("  (product default · cybernode edge)");
-}
-
 fn cmd_sync(rpc: String) {
     let base = rpc.trim_end_matches('/');
     println!("cyber sync · {CHAIN_ID}");
     println!("  rpc              {base}");
-
     match probe(base) {
         Ok(s) => {
             println!("  reachable        yes");
+            if !s.engine.is_empty() {
+                println!("  engine           {}", s.engine);
+            }
             if !s.chain_id.is_empty() {
                 println!("  chain_id         {}", s.chain_id);
             }
@@ -120,8 +100,13 @@ fn cmd_sync(rpc: String) {
                 println!("  moniker          {}", s.moniker);
             }
             println!("  latest_height    {}", s.latest_height);
-            if s.earliest_height > 0 {
-                println!("  earliest_height  {}", s.earliest_height);
+            if !s.bbg_root.is_empty() {
+                println!("  bbg_root         {}", s.bbg_root);
+            }
+            if s.signals > 0 || s.particles > 0 {
+                println!("  signals          {}", s.signals);
+                println!("  particles        {}", s.particles);
+                println!("  axons            {}", s.axons);
             }
             println!(
                 "  catching_up      {}",
@@ -132,11 +117,9 @@ fn cmd_sync(rpc: String) {
             println!("  reachable        no");
             println!("  detail           {e}");
             println!();
-            println!("checks:");
-            println!("  1. which cyber     # must be ~/.cargo/bin/cyber from true-cyber");
-            println!("  2. cyber version   # expect: cyber x.y (true-cyber)");
-            println!("  3. curl -sS {base}/status | head");
-            println!("  4. cargo install true-cyber --force");
+            println!("  which cyber && cyber version   # expect true-cyber");
+            println!("  curl -sS {base}/status | head");
+            println!("  cargo install soft3 true-cyber --force");
             process::exit(1);
         }
     }
@@ -145,58 +128,22 @@ fn cmd_sync(rpc: String) {
 struct Status {
     chain_id: String,
     moniker: String,
+    engine: String,
     latest_height: u64,
-    earliest_height: u64,
+    bbg_root: String,
+    signals: u64,
+    particles: u64,
+    axons: u64,
     catching_up: bool,
 }
 
 fn probe(base: &str) -> Result<Status, String> {
-    // try several shapes — trailing slash, /status, /health
-    let candidates = [
-        format!("{base}/status"),
-        format!("{base}/status/"),
-        format!("{base}/"),
-        base.to_string(),
-        format!("{base}/health"),
-    ];
-
-    let mut last_err = String::from("no response");
-    for url in &candidates {
-        match http_get(url) {
-            Ok((code, body)) if code < 500 => {
-                if url.contains("health") && body.trim() == "ok" {
-                    return Ok(Status {
-                        chain_id: CHAIN_ID.into(),
-                        moniker: String::new(),
-                        latest_height: 0,
-                        earliest_height: 0,
-                        catching_up: false,
-                    });
-                }
-                if let Some(s) = parse_status(&body) {
-                    return Ok(s);
-                }
-                // non-json 2xx still counts as reachable if path was /status-ish
-                if code == 200 && url.contains("status") {
-                    return Ok(Status {
-                        chain_id: CHAIN_ID.into(),
-                        moniker: String::new(),
-                        latest_height: 0,
-                        earliest_height: 0,
-                        catching_up: false,
-                    });
-                }
-                last_err = format!("http {code} from {url} (unparsed body)");
-            }
-            Ok((code, _)) => {
-                last_err = format!("http {code} from {url}");
-            }
-            Err(e) => {
-                last_err = format!("{url}: {e}");
-            }
-        }
+    let url = format!("{base}/status");
+    let (code, body) = http_get(&url)?;
+    if code >= 500 {
+        return Err(format!("http {code} from {url}"));
     }
-    Err(last_err)
+    parse_status(&body).ok_or_else(|| format!("unparsed status from {url}"))
 }
 
 fn parse_status(body: &str) -> Option<Status> {
@@ -204,28 +151,40 @@ fn parse_status(body: &str) -> Option<Status> {
     let result = v.get("result").unwrap_or(&v);
     let node = result.get("node_info");
     let sync = result.get("sync_info");
-    let chain_id = node
-        .and_then(|n| n.get("network"))
-        .and_then(|x| x.as_str())
-        .unwrap_or(CHAIN_ID)
-        .to_string();
-    let moniker = node
-        .and_then(|n| n.get("moniker"))
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let latest_height = json_u64(sync.and_then(|s| s.get("latest_block_height"))).unwrap_or(0);
-    let earliest_height = json_u64(sync.and_then(|s| s.get("earliest_block_height"))).unwrap_or(0);
-    let catching_up = sync
-        .and_then(|s| s.get("catching_up"))
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
+    let soft = result.get("soft3");
     Some(Status {
-        chain_id,
-        moniker,
-        latest_height,
-        earliest_height,
-        catching_up,
+        chain_id: node
+            .and_then(|n| n.get("network"))
+            .and_then(|x| x.as_str())
+            .unwrap_or(CHAIN_ID)
+            .into(),
+        moniker: node
+            .and_then(|n| n.get("moniker"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into(),
+        engine: node
+            .and_then(|n| n.get("engine"))
+            .and_then(|x| x.as_str())
+            .or_else(|| {
+                node.and_then(|n| n.get("protocol"))
+                    .and_then(|x| x.as_str())
+            })
+            .unwrap_or("")
+            .into(),
+        latest_height: json_u64(sync.and_then(|s| s.get("latest_block_height"))).unwrap_or(0),
+        bbg_root: sync
+            .and_then(|s| s.get("bbg_root"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into(),
+        signals: json_u64(soft.and_then(|s| s.get("signals"))).unwrap_or(0),
+        particles: json_u64(soft.and_then(|s| s.get("particles"))).unwrap_or(0),
+        axons: json_u64(soft.and_then(|s| s.get("axons"))).unwrap_or(0),
+        catching_up: sync
+            .and_then(|s| s.get("catching_up"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -247,20 +206,18 @@ fn http_get(url: &str) -> Result<(u16, String), String> {
 
 fn print_help() {
     println!(
-        "cyber {} — spacepussy-test product CLI",
+        "cyber {} — product face of soft3 spacepussy-test",
         env!("CARGO_PKG_VERSION")
     );
     println!();
     println!("  cargo install true-cyber");
-    println!("  cyber sync                 # probe public chaosnet");
-    println!("  cyber network              # endpoints");
-    println!("  cyber version");
+    println!("  cyber sync                 # probe soft3 node on cybernode");
+    println!("  cyber network");
     println!();
-    println!("  default rpc: {DEFAULT_RPC}");
+    println!("  the network is soft3:");
+    println!("    cargo install soft3");
+    println!("    soft3 node --bind 127.0.0.1:7780");
     println!();
-    println!("  if install fails:  rustup update stable && rustc --version  # need 1.74+");
-    println!("  if wrong binary:   which cyber && cargo install true-cyber --force");
-    println!("  if sync fails:     curl -sS {DEFAULT_RPC}/status | head");
-    println!();
-    println!("  not the cosmos go-cyber `cyber` binary (bostrom / space-pussy bootloader).");
+    println!("  public rpc: {DEFAULT_RPC}");
+    println!("  docs: https://cyber.page/soft3/docs/launch");
 }

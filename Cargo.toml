@@ -6,7 +6,7 @@
 # true-cyber — product CLI. cargo install true-cyber → binary `cyber`
 [package]
 name = "true-cyber"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "cyber — thin product CLI for spacepussy-test (soft3 chaosnet on cybernode)"
 license-file = "LICENSE"

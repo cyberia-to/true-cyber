@@ -7,45 +7,41 @@ alias: cyber cli, true-cyber
 ---
 # true-cyber
 
-the product CLI for [cyber](https://cyber.page) — binary name `cyber`, crate name `true-cyber` (crates.io `cyber` is taken).
+product CLI for [cyber](https://cyber.page) — binary `cyber`, crate `true-cyber`.
 
 ```bash
 cargo install true-cyber
 cyber sync
 ```
 
-default network is **space-pussy** — the chaosnet. override with `-n bostrom`.
+default network: **spacepussy-test** — the soft3 chaosnet (local node at `http://127.0.0.1:7780`).
 
 ```bash
-cyber sync                 # probe space-pussy RPC
-cyber sync -n bostrom      # probe bostrom
-cyber network              # endpoints for the default network
-cyber network bostrom
+cyber sync                 # probe spacepussy-test
+cyber network              # endpoints
 cyber manifesto
 cyber help
 ```
 
+## what this is not
+
+`space-pussy` and `bostrom` on [cybernode](https://cybernode.ai) are **cosmos-sdk bootloader** chains (go-cyber). they are migration sources for the soft3 network. they are not the product default. `cyber sync -n space-pussy` is rejected on purpose.
+
 ## faces
 
-day-one needs only `true-cyber`. soft3 and cyb are optional deeper faces:
+day-one needs only `true-cyber`. soft3 / cyb remain optional deeper faces:
 
 ```bash
-cyber soft3 …              # forward if `soft3` is on PATH
-cyber cy …                 # forward if `cy` is on PATH
+cyber soft3 …
+cyber cy …
 ```
-
-network presets and probe come from the [soft3](https://crates.io/crates/soft3) crate in-process — no separate install for `cyber sync`.
 
 ## toolchain (advanced)
 
-build the full stack from source under `$CYBER_ROOT` (default `~/cyber`):
-
 ```bash
 cyber tools
-cyber source               # clone missing repos
-cyber install --all        # build tools onto ~/.cargo/bin
-cyber install zheng        # one tool
-cyber zheng …              # run a registered tool
+cyber source
+cyber install --all
 ```
 
 ## license

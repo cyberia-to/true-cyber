@@ -7,14 +7,14 @@
 # `cargo install true-cyber` puts `cyber` on PATH.
 [package]
 name = "true-cyber"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "cyber — product CLI for the superintelligence protocol (network presets, soft3/cyb face)"
+description = "cyber — product CLI for spacepussy-test (soft3 chaosnet); binary name cyber"
 license-file = "LICENSE"
 repository = "https://github.com/cyberia-to/true-cyber"
 homepage = "https://cyber.page"
 readme = "README.md"
-keywords = ["cyber", "soft3", "cyb", "cybergraph", "cli"]
+keywords = ["cyber", "soft3", "spacepussy-test", "cli"]
 categories = ["command-line-utilities", "science"]
 rust-version = "1.74"
 
@@ -23,7 +23,7 @@ name = "cyber"
 path = "src/main.rs"
 
 [dependencies]
-# network presets + probe (space-pussy default, bostrom)
-soft3 = "0.3.1"
+# product network presets + probe (spacepussy-test only — not cosmos bootloader)
+soft3 = "0.4.0"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

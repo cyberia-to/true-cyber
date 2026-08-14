@@ -3,22 +3,19 @@
 // crystal-type: source
 // crystal-domain: cyber
 // ---
-//! cyber — product CLI for the superintelligence protocol.
+//! cyber — product CLI for the soft3 chaosnet **spacepussy-test**.
 //!
 //! ```text
 //! cargo install true-cyber
-//! cyber sync                 # probe space-pussy (default chaosnet)
-//! cyber sync -n bostrom      # probe bostrom
+//! cyber sync                 # probe spacepussy-test (local soft3 node)
 //! cyber network              # print endpoints
 //! ```
 //!
 //! Crate name is `true-cyber` because crates.io `cyber` is taken.
 //! Binary on PATH is always `cyber`.
 //!
-//! Thin face over soft3 (stack / network) and cyb (robot). Day-one
-//! commands use soft3's network module in-process — no separate
-//! `cargo install soft3` / `cyb` required for sync. Advanced
-//! toolchain bootstrap lives under `cyber tools` / `cyber install`.
+//! Not a wrapper around cosmos bootloader RPC (space-pussy / bostrom on
+//! cybernode). Those chains are migration sources — see cyber.page/bootloader.
 
 use soft3::network::{self, Network};
 use std::path::{Path, PathBuf};
@@ -47,7 +44,7 @@ fn red(s: &str) -> String {
     paint("31", s)
 }
 
-// ── network product surface (soft3 presets) ─────────────────────────────────
+// ── network product surface ─────────────────────────────────────────────────
 
 fn parse_global_network(args: &[String]) -> (Network, Vec<String>) {
     let mut net = Network::DEFAULT;
@@ -57,10 +54,7 @@ fn parse_global_network(args: &[String]) -> (Network, Vec<String>) {
         if args[i] == "--network" || args[i] == "-n" {
             i += 1;
             let name = args.get(i).map(|s| s.as_str()).unwrap_or("");
-            net = Network::parse(name).unwrap_or_else(|| {
-                eprintln!("unknown network `{name}` (use space-pussy|bostrom|pussy|boot)");
-                std::process::exit(2);
-            });
+            net = parse_net(name);
         } else {
             rest.push(args[i].clone());
         }
@@ -69,31 +63,62 @@ fn parse_global_network(args: &[String]) -> (Network, Vec<String>) {
     (net, rest)
 }
 
+fn parse_net(name: &str) -> Network {
+    if let Some(n) = Network::parse(name) {
+        return n;
+    }
+    if Network::is_bootloader_name(name) {
+        eprintln!(
+            "`{name}` is a cosmos bootloader chain on cybernode — not spacepussy-test."
+        );
+        eprintln!(
+            "product network: {} ({})",
+            Network::DEFAULT,
+            Network::DEFAULT.role()
+        );
+        eprintln!("  rpc {}", Network::DEFAULT.rpc());
+        std::process::exit(2);
+    }
+    eprintln!("unknown network `{name}` (use spacepussy-test|test|soft3)");
+    std::process::exit(2);
+}
+
 fn cmd_sync(net: Network) {
+    println!("cyber sync · {}", net.chain_id());
+    println!("  role             {}", net.role());
+    println!("  rpc              {}", net.rpc());
     match network::probe(net) {
         Ok(s) => {
-            println!("cyber sync · {}", s.network);
-            println!("  chain_id        {}", s.chain_id);
-            println!("  moniker         {}", s.moniker);
-            println!("  latest_height   {}", s.latest_height);
-            println!("  earliest_height {}", s.earliest_height);
             println!(
-                "  catching_up     {}",
-                if s.catching_up { "yes" } else { "no" }
+                "  reachable        {}",
+                if s.reachable {
+                    green("yes")
+                } else {
+                    yellow("degraded")
+                }
             );
-            println!("  rpc             {}", s.network.rpc());
-            if s.chain_id != s.network.chain_id() {
-                println!("  warn: expected chain_id `{}`", s.network.chain_id());
+            if let Some(code) = s.http_status {
+                println!("  http             {code}");
             }
-            println!();
-            println!(
-                "default network: {}  (override: cyber sync -n bostrom)",
-                Network::DEFAULT
-            );
+            if !s.body_preview.is_empty() {
+                println!(
+                    "  body             {}",
+                    s.body_preview.replace('\n', " ")
+                );
+            }
         }
         Err(e) => {
-            eprintln!("cyber sync failed: {e}");
-            eprintln!("rpc: {}", net.rpc());
+            println!("  reachable        {}", red("no"));
+            println!("  detail           {e}");
+            println!();
+            println!("{}", bold("spacepussy-test"));
+            println!("  soft3 chaosnet — product default after install.");
+            println!();
+            println!("{}", dim("not this:"));
+            println!(
+                "  {}",
+                dim("cosmos space-pussy / bostrom on cybernode (bootloader migration sources)")
+            );
             std::process::exit(1);
         }
     }
@@ -101,6 +126,7 @@ fn cmd_sync(net: Network) {
 
 fn cmd_network(net: Network) {
     println!("network {}", net.chain_id());
+    println!("  role     {}", net.role());
     println!("  prefix   {}", net.bech32_prefix());
     println!("  denom    {}", net.denom());
     println!("  rpc      {}", net.rpc());
@@ -131,7 +157,6 @@ fn which(bin: &str) -> Option<PathBuf> {
     None
 }
 
-/// Run an external binary if on PATH; otherwise explain the product path.
 fn forward(bin: &str, args: &[String], hint: &str) {
     match which(bin) {
         Some(path) => {
@@ -147,7 +172,10 @@ fn forward(bin: &str, args: &[String], hint: &str) {
         None => {
             eprintln!("  {} `{bin}` not on PATH", yellow("·"));
             eprintln!("  {}", dim(hint));
-            eprintln!("  day-one surface is already here: {}", green("cyber sync"));
+            eprintln!(
+                "  day-one surface: {}",
+                green("cyber sync")
+            );
             std::process::exit(2);
         }
     }
@@ -243,7 +271,6 @@ fn sync_one(name: &str, root: &Path) -> bool {
     ok
 }
 
-/// Clone source repos into $CYBER_ROOT (advanced).
 fn cmd_source(names: &[String]) {
     let root = cyber_root();
     let _ = std::fs::create_dir_all(&root);
@@ -363,7 +390,10 @@ fn cmd_install(names: &[String]) {
 }
 
 fn show_tools() {
-    println!("{}", dim("toolchain — advanced · day-one is `cyber sync`"));
+    println!(
+        "{}",
+        dim("toolchain — advanced · day-one is `cyber sync` → spacepussy-test")
+    );
     for t in registry() {
         let link = bin_dir().join(&t.name);
         let (mark, note) = if std::fs::metadata(&link).is_ok() {
@@ -412,46 +442,43 @@ fn dispatch_tool(name: &str, args: &[String]) {
 fn show_help() {
     let n = Network::DEFAULT;
     println!(
-        "{} {} — planetary superintelligence CLI",
+        "{} {} — spacepussy-test CLI",
         bold("cyber"),
         env!("CARGO_PKG_VERSION")
     );
     println!();
-    println!("  default network: {}  ({})", n.chain_id(), n.rpc());
+    println!("  default: {}  ({})", n.chain_id(), n.rpc());
+    println!("  {}", dim(n.role()));
     println!();
     println!("  {}", bold("day one"));
     println!(
-        "  {}               probe the default network (space-pussy)",
+        "  {}          probe spacepussy-test (local soft3 node)",
         bold("cyber sync")
     );
-    println!("  {}   probe bostrom", bold("cyber sync -n bostrom"));
     println!(
-        "  {}       print endpoints (space-pussy|bostrom)",
-        bold("cyber network [name]")
+        "  {}       print endpoints",
+        bold("cyber network")
     );
+    println!("  {}         soft3 manifesto", bold("cyber manifesto"));
+    println!();
+    println!("  {}", bold("not product networks"));
     println!(
-        "  {}            soft3 manifesto lines",
-        bold("cyber manifesto")
+        "  {}",
+        dim("space-pussy · bostrom  — cosmos bootloader on cybernode (migration sources)")
     );
     println!();
-    println!("  {}", bold("faces"));
-    println!(
-        "  {} …            forward to soft3 binary if installed",
-        bold("cyber soft3")
-    );
-    println!(
-        "  {} …                forward to cy binary if installed",
-        bold("cyber cy")
-    );
+    println!("  {}", bold("faces (optional)"));
+    println!("  {} …       forward if installed", bold("cyber soft3"));
+    println!("  {} …           forward if installed", bold("cyber cy"));
     println!();
     println!("  {}", bold("toolchain (advanced)"));
-    println!("  {}           list stack tools", bold("cyber tools"));
+    println!("  {}          list stack tools", bold("cyber tools"));
     println!(
-        "  {}    clone sources into $CYBER_ROOT",
+        "  {}         clone sources into $CYBER_ROOT",
         bold("cyber source")
     );
     println!(
-        "  {} build tools from source onto PATH",
+        "  {}  build tools from source onto PATH",
         bold("cyber install --all")
     );
     println!();
@@ -464,11 +491,12 @@ fn show_help() {
 
 fn show_status(net: Network) {
     println!(
-        "{} {}  ·  network {}",
+        "{} {}  ·  {}",
         bold("cyber"),
         env!("CARGO_PKG_VERSION"),
         net.chain_id()
     );
+    println!("  {}", dim(net.role()));
     println!("  rpc  {}", net.rpc());
     println!();
     println!("  {}  {}", dim("probe:"), green("cyber sync"));
@@ -488,19 +516,22 @@ fn main() {
         "" | "status" => show_status(net),
         "sync" => cmd_sync(net),
         "network" | "net" => {
-            let n = rest.first().and_then(|s| Network::parse(s)).unwrap_or(net);
+            let n = rest
+                .first()
+                .map(|s| parse_net(s))
+                .unwrap_or(net);
             cmd_network(n);
         }
         "manifesto" => cmd_manifesto(),
         "soft3" => forward(
             "soft3",
             rest,
-            "optional: cargo install soft3 — cyber already covers sync/network",
+            "optional: cargo install soft3",
         ),
         "cy" | "cyb" => forward(
             "cy",
             rest,
-            "optional: cargo install cyb — robot terminal face",
+            "optional: cargo install cyb",
         ),
         "source" | "clone" => cmd_source(rest),
         "install" => cmd_install(rest),
@@ -508,9 +539,10 @@ fn main() {
         "help" | "--help" | "-h" | "?" => show_help(),
         "version" | "--version" | "-V" => {
             println!(
-                "cyber {} (true-cyber) · soft3 {}",
+                "cyber {} (true-cyber) · soft3 {} · {}",
                 env!("CARGO_PKG_VERSION"),
-                soft3::VERSION
+                soft3::VERSION,
+                Network::DEFAULT.chain_id()
             );
         }
         name if tool(name).is_some() => dispatch_tool(name, rest),

@@ -859,9 +859,9 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "soft3"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16f97cfca8a824d3d3af68520230228b00b309e6b37d60c34f328a5d9e9c0915"
+checksum = "32f07bfbd18cd0ef949ed8c6d449192d1f5532816707708b9ba2e74b130478d1"
 dependencies = [
  "cyb",
  "cybergraph",
@@ -1080,7 +1080,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "true-cyber"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "soft3",

@@ -3,19 +3,18 @@
 # crystal-type: source
 # crystal-domain: cyber
 # ---
-# true-cyber — product face of the cyber stack on crates.io.
-# `cargo install true-cyber` puts `cyber` on PATH.
+# true-cyber — product CLI. cargo install true-cyber → binary `cyber`
 [package]
 name = "true-cyber"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
-description = "cyber — product CLI for spacepussy-test on cybernode; binary name cyber"
+description = "cyber — thin product CLI for spacepussy-test (soft3 chaosnet on cybernode)"
 license-file = "LICENSE"
 repository = "https://github.com/cyberia-to/true-cyber"
 homepage = "https://cyber.page"
 readme = "README.md"
 keywords = ["cyber", "soft3", "spacepussy-test", "cli"]
-categories = ["command-line-utilities", "science"]
+categories = ["command-line-utilities"]
 rust-version = "1.74"
 
 [[bin]]
@@ -23,7 +22,5 @@ name = "cyber"
 path = "src/main.rs"
 
 [dependencies]
-# product network presets + probe (spacepussy-test only — not cosmos bootloader)
-soft3 = "0.5.0"
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+serde_json = "1"

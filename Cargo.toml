@@ -3,18 +3,19 @@
 # crystal-type: source
 # crystal-domain: cyber
 # ---
-# true-cyber — the bootstrap face of the cyber stack. `cargo install true-cyber`
-# puts `cyber` on PATH; `cyber install --all` turns a bare machine into a
-# working cyber system built from source.
+# true-cyber — product face of the cyber stack on crates.io.
+# `cargo install true-cyber` puts `cyber` on PATH.
 [package]
 name = "true-cyber"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "cyber — bootstrap the cyber stack: sync the repos, build the toolset from source, run every tool by name"
+description = "cyber — product CLI for the superintelligence protocol (network presets, soft3/cyb face)"
 license-file = "LICENSE"
 repository = "https://github.com/cyberia-to/true-cyber"
-keywords = ["cyber", "cybergraph", "soft3", "toolchain", "bootstrap"]
-categories = ["command-line-utilities", "development-tools"]
+homepage = "https://cyber.page"
+readme = "README.md"
+keywords = ["cyber", "soft3", "cyb", "cybergraph", "cli"]
+categories = ["command-line-utilities", "science"]
 rust-version = "1.74"
 
 [[bin]]
@@ -22,5 +23,7 @@ name = "cyber"
 path = "src/main.rs"
 
 [dependencies]
+# network presets + probe (space-pussy default, bostrom)
+soft3 = "0.3.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

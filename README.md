@@ -23,6 +23,10 @@ cyber manifesto
 cyber help
 ```
 
+## launch
+
+operator guide for standing up spacepussy-test: [soft3/docs/launch](https://cyber.page/soft3/docs/launch) (source: `soft3/docs/launch.md`).
+
 ## what this is not
 
 `space-pussy` and `bostrom` on [cybernode](https://cybernode.ai) are **cosmos-sdk bootloader** chains (go-cyber). they are migration sources for the soft3 network. they are not the product default. `cyber sync -n space-pussy` is rejected on purpose.

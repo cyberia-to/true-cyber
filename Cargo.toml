@@ -7,9 +7,9 @@
 # `cargo install true-cyber` puts `cyber` on PATH.
 [package]
 name = "true-cyber"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "cyber — product CLI for spacepussy-test (soft3 chaosnet); binary name cyber"
+description = "cyber — product CLI for spacepussy-test on cybernode; binary name cyber"
 license-file = "LICENSE"
 repository = "https://github.com/cyberia-to/true-cyber"
 homepage = "https://cyber.page"
@@ -24,6 +24,6 @@ path = "src/main.rs"
 
 [dependencies]
 # product network presets + probe (spacepussy-test only — not cosmos bootloader)
-soft3 = "0.4.0"
+soft3 = "0.5.0"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

@@ -6,7 +6,7 @@
 # true-cyber — product CLI. cargo install true-cyber → binary `cyber`
 [package]
 name = "true-cyber"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "cyber — thin product CLI for spacepussy-test (soft3 chaosnet on cybernode)"
 license-file = "LICENSE"
@@ -22,4 +22,9 @@ name = "cyber"
 path = "src/main.rs"
 
 [dependencies]
+# the cell engine — same crates the full node runs on
+cybergraph = "0.1"
+foculus = { version = "0.1", default-features = false }
+hemera = { package = "cyber-hemera", version = "0.3" }
+# the last borrowed transport — radio replaces it
 ureq = { version = "2", default-features = false, features = ["tls"] }

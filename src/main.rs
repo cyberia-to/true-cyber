@@ -137,6 +137,22 @@ struct Status {
     catching_up: bool,
 }
 
+impl Status {
+    fn empty() -> Self {
+        Status {
+            chain_id: String::new(),
+            moniker: String::new(),
+            engine: String::new(),
+            latest_height: 0,
+            bbg_root: String::new(),
+            signals: 0,
+            particles: 0,
+            axons: 0,
+            catching_up: false,
+        }
+    }
+}
+
 fn probe(base: &str) -> Result<Status, String> {
     let url = format!("{base}/status");
     let (code, body) = http_get(&url)?;
@@ -146,52 +162,85 @@ fn probe(base: &str) -> Result<Status, String> {
     parse_status(&body).ok_or_else(|| format!("unparsed status from {url}"))
 }
 
+/// The native wire is a cybermark particle — frontmatter `key: value` lines
+/// between `---` fences. Nodes still on soft3 <0.7 answer in JSON; a tiny
+/// string extractor keeps them readable through the transition.
 fn parse_status(body: &str) -> Option<Status> {
-    let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let result = v.get("result").unwrap_or(&v);
-    let node = result.get("node_info");
-    let sync = result.get("sync_info");
-    let soft = result.get("soft3");
-    Some(Status {
-        chain_id: node
-            .and_then(|n| n.get("network"))
-            .and_then(|x| x.as_str())
-            .unwrap_or(CHAIN_ID)
-            .into(),
-        moniker: node
-            .and_then(|n| n.get("moniker"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .into(),
-        engine: node
-            .and_then(|n| n.get("engine"))
-            .and_then(|x| x.as_str())
-            .or_else(|| {
-                node.and_then(|n| n.get("protocol"))
-                    .and_then(|x| x.as_str())
-            })
-            .unwrap_or("")
-            .into(),
-        latest_height: json_u64(sync.and_then(|s| s.get("latest_block_height"))).unwrap_or(0),
-        bbg_root: sync
-            .and_then(|s| s.get("bbg_root"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .into(),
-        signals: json_u64(soft.and_then(|s| s.get("signals"))).unwrap_or(0),
-        particles: json_u64(soft.and_then(|s| s.get("particles"))).unwrap_or(0),
-        axons: json_u64(soft.and_then(|s| s.get("axons"))).unwrap_or(0),
-        catching_up: sync
-            .and_then(|s| s.get("catching_up"))
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false),
-    })
+    if body.trim_start().starts_with("---") {
+        parse_cybermark(body)
+    } else {
+        parse_legacy_json(body)
+    }
 }
 
-fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
-    let v = v?;
-    v.as_u64()
-        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+fn parse_cybermark(body: &str) -> Option<Status> {
+    let mut s = Status::empty();
+    let mut in_frontmatter = false;
+    let mut fields = 0u32;
+    for line in body.lines() {
+        let t = line.trim();
+        if t == "---" {
+            if in_frontmatter {
+                break;
+            }
+            in_frontmatter = true;
+            continue;
+        }
+        if !in_frontmatter {
+            continue;
+        }
+        let Some((k, v)) = t.split_once(':') else {
+            continue;
+        };
+        let v = v.trim();
+        fields += 1;
+        match k.trim() {
+            "chain" => s.chain_id = v.into(),
+            "moniker" => s.moniker = v.into(),
+            "engine" => s.engine = v.into(),
+            "height" => s.latest_height = v.parse().unwrap_or(0),
+            "bbg-root" => s.bbg_root = v.into(),
+            "signals" => s.signals = v.parse().unwrap_or(0),
+            "particles" => s.particles = v.parse().unwrap_or(0),
+            "axons" => s.axons = v.parse().unwrap_or(0),
+            "catching-up" => s.catching_up = v == "true",
+            _ => fields -= 1,
+        }
+    }
+    (fields > 0).then_some(s)
+}
+
+/// Pull the few known fields out of the pre-0.7 JSON status with plain string
+/// search — enough for our own emitter, no JSON dependency.
+fn parse_legacy_json(body: &str) -> Option<Status> {
+    if !body.trim_start().starts_with('{') {
+        return None;
+    }
+    let field = |key: &str| -> Option<String> {
+        let probe = format!("\"{key}\"");
+        let at = body.find(&probe)? + probe.len();
+        let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
+        if let Some(r) = rest.strip_prefix('"') {
+            Some(r[..r.find('"')?].to_string())
+        } else {
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+                .unwrap_or(rest.len());
+            Some(rest[..end].to_string())
+        }
+    };
+    let num = |key: &str| field(key).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut s = Status::empty();
+    s.chain_id = field("network").unwrap_or_else(|| CHAIN_ID.into());
+    s.moniker = field("moniker").unwrap_or_default();
+    s.engine = field("engine").or_else(|| field("protocol")).unwrap_or_default();
+    s.latest_height = num("latest_block_height");
+    s.bbg_root = field("bbg_root").unwrap_or_default();
+    s.signals = num("signals");
+    s.particles = num("particles");
+    s.axons = num("axons");
+    s.catching_up = field("catching_up").as_deref() == Some("true");
+    Some(s)
 }
 
 fn http_get(url: &str) -> Result<(u16, String), String> {

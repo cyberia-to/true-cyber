@@ -1,0 +1,22 @@
+cyber — authenticated native graph client
+
+  cyber status [--home DIR]
+  cyber neuron [list | create NAME NETWORK_HEX | attach KEY_FILE NETWORK_HEX]
+  cyber neuron [watch SUBJECT NETWORK | watch-foreign DOMAIN ADDRESS NETWORK]
+  cyber neuron [use ID | revoke ID | devices ID DEVICE,... | actions | result ID]
+  cyber sync --network NETWORK_HEX [--rpc URL]
+  cyber link FROM TO --network NETWORK_HEX [--attachment ID] [--rpc URL]
+             [--request REQUEST_HEX] [--amount POSITIVE_U64] [--valence I8]
+  cyber relay --network NETWORK_HEX [--attachment ID] [--rpc URL]
+  cyber receipt REQUEST_HEX --network NETWORK_HEX [--rpc URL]
+  cyber legacy inspect
+  cyber legacy export NEW_FILE
+  cyber network | version | help
+
+Every command accepts --home DIR; otherwise CYBER_HOME, then
+~/.cyber/spacepussy-test. Existing log files are strictly imported and retained.
+Key creation and attachment are explicit. No author-label --neuron fallback.
+FROM/TO are hex particles or text labels hashed with Hemera.
+The default RPC is https://cyb.ai/spacepussy-test; network identity is always an
+explicit pin. Endpoint acceptance and local replay do not assert consensus finality.
+Unknown submissions retain their request: use exact link retry, relay or receipt.

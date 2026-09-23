@@ -525,3 +525,238 @@ fn print_help() {
     println!("    cargo install soft3");
     println!("    soft3 node --bind 127.0.0.1:7780");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    // ── flag_value ───────────────────────────────────────────────────────
+
+    #[test]
+    fn flag_value_present() {
+        let args = vec![s("--neuron"), s("01")];
+        assert_eq!(flag_value(&args, "--neuron"), Some(s("01")));
+    }
+
+    #[test]
+    fn flag_value_absent() {
+        let args = vec![s("--amount"), s("5")];
+        assert_eq!(flag_value(&args, "--neuron"), None);
+    }
+
+    #[test]
+    fn flag_value_dangling_no_value() {
+        let args = vec![s("--amount"), s("5"), s("--neuron")];
+        assert_eq!(flag_value(&args, "--neuron"), None);
+    }
+
+    #[test]
+    fn flag_value_empty_args() {
+        let args: Vec<String> = vec![];
+        assert_eq!(flag_value(&args, "--neuron"), None);
+    }
+
+    #[test]
+    fn flag_value_first_occurrence_wins() {
+        let args = vec![s("--neuron"), s("01"), s("--neuron"), s("02")];
+        assert_eq!(flag_value(&args, "--neuron"), Some(s("01")));
+    }
+
+    // ── rpc_from_args ────────────────────────────────────────────────────
+
+    #[test]
+    fn rpc_from_args_default() {
+        let args: Vec<String> = vec![];
+        assert_eq!(rpc_from_args(&args), DEFAULT_RPC);
+    }
+
+    #[test]
+    fn rpc_from_args_explicit() {
+        let args = vec![s("--rpc"), s("http://example.test")];
+        assert_eq!(rpc_from_args(&args), "http://example.test");
+    }
+
+    #[test]
+    fn rpc_from_args_dangling_rpc_keeps_default() {
+        let args = vec![s("--rpc")];
+        assert_eq!(rpc_from_args(&args), DEFAULT_RPC);
+    }
+
+    #[test]
+    fn rpc_from_args_last_rpc_wins() {
+        let args = vec![s("--rpc"), s("http://a"), s("--rpc"), s("http://b")];
+        assert_eq!(rpc_from_args(&args), "http://b");
+    }
+
+    #[test]
+    fn rpc_from_args_unrelated_network_name_is_a_noop() {
+        // "spacepussy-test" itself is not in the rejected cosmos-name list,
+        // so --network here must not exit and must not affect rpc.
+        let args = vec![s("--network"), s(CHAIN_ID)];
+        assert_eq!(rpc_from_args(&args), DEFAULT_RPC);
+    }
+
+    #[test]
+    fn rpc_from_args_dash_n_alias_accepted() {
+        let args = vec![s("-n"), s(CHAIN_ID), s("--rpc"), s("http://x")];
+        assert_eq!(rpc_from_args(&args), "http://x");
+    }
+
+    // ── parse_hex32 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_hex32_full_length() {
+        let hex_in = "ab".repeat(32);
+        let got = parse_hex32(&hex_in).unwrap();
+        assert_eq!(got, [0xab; 32]);
+    }
+
+    #[test]
+    fn parse_hex32_0x_prefix_stripped() {
+        let hex_in = format!("0x{}", "ff".repeat(32));
+        let got = parse_hex32(&hex_in).unwrap();
+        assert_eq!(got, [0xff; 32]);
+    }
+
+    #[test]
+    fn parse_hex32_short_is_left_padded() {
+        let got = parse_hex32("1").unwrap();
+        let mut want = [0u8; 32];
+        want[31] = 1;
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_hex32_rejects_non_hex_char() {
+        assert_eq!(parse_hex32("zz"), None);
+    }
+
+    #[test]
+    fn parse_hex32_rejects_empty() {
+        assert_eq!(parse_hex32(""), None);
+        assert_eq!(parse_hex32("0x"), None);
+    }
+
+    #[test]
+    fn parse_hex32_rejects_over_64_chars() {
+        let too_long = "a".repeat(65);
+        assert_eq!(parse_hex32(&too_long), None);
+    }
+
+    // ── key32 ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn key32_hex_input_matches_parse_hex32() {
+        let hex_in = "cd".repeat(32);
+        assert_eq!(key32(&hex_in).unwrap(), parse_hex32(&hex_in).unwrap());
+    }
+
+    #[test]
+    fn key32_non_hex_input_hashes_the_label() {
+        let want = *hemera::hash(b"alice").as_bytes();
+        assert_eq!(key32("alice").unwrap(), want);
+    }
+
+    #[test]
+    fn key32_never_fails() {
+        assert!(key32("").is_ok());
+        assert!(key32("not valid hex but still a label").is_ok());
+    }
+
+    // ── hex ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hex_formats_bytes_lowercase() {
+        assert_eq!(hex(&[0x00, 0xab, 0xff]), "00abff");
+    }
+
+    #[test]
+    fn hex_empty_is_empty_string() {
+        assert_eq!(hex(&[]), "");
+    }
+
+    // ── parse_cybermark ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_cybermark_reads_known_fields() {
+        let body = "---\nchain: spacepussy-test\nmoniker: node-1\nengine: soft3/v1\nheight: 42\nbbg-root: deadbeef\nsignals: 7\nparticles: 3\naxons: 2\ncatching-up: true\n---\n";
+        let st = parse_cybermark(body).unwrap();
+        assert_eq!(st.chain_id, "spacepussy-test");
+        assert_eq!(st.moniker, "node-1");
+        assert_eq!(st.engine, "soft3/v1");
+        assert_eq!(st.latest_height, 42);
+        assert_eq!(st.bbg_root, "deadbeef");
+        assert_eq!(st.signals, 7);
+        assert_eq!(st.particles, 3);
+        assert_eq!(st.axons, 2);
+        assert!(st.catching_up);
+    }
+
+    #[test]
+    fn parse_cybermark_stops_at_second_fence() {
+        let body = "---\nheight: 1\n---\nheight: 999\n";
+        let st = parse_cybermark(body).unwrap();
+        assert_eq!(st.latest_height, 1);
+    }
+
+    #[test]
+    fn parse_cybermark_unknown_key_does_not_count_as_a_field() {
+        let body = "---\nmystery: 1\n---\n";
+        assert!(parse_cybermark(body).is_none());
+    }
+
+    #[test]
+    fn parse_cybermark_no_frontmatter_is_none() {
+        assert!(parse_cybermark("plain text, no fences").is_none());
+    }
+
+    #[test]
+    fn parse_cybermark_catching_up_false_by_default_text() {
+        let body = "---\ncatching-up: false\n---\n";
+        let st = parse_cybermark(body).unwrap();
+        assert!(!st.catching_up);
+    }
+
+    // ── parse_legacy_json ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_legacy_json_reads_known_fields() {
+        let body = r#"{"network":"spacepussy-test","moniker":"node-1","latest_block_height":"42","bbg_root":"deadbeef","signals":"7"}"#;
+        let st = parse_legacy_json(body).unwrap();
+        assert_eq!(st.chain_id, "spacepussy-test");
+        assert_eq!(st.moniker, "node-1");
+        assert_eq!(st.latest_height, 42);
+        assert_eq!(st.bbg_root, "deadbeef");
+        assert_eq!(st.signals, 7);
+    }
+
+    #[test]
+    fn parse_legacy_json_missing_network_falls_back_to_chain_id() {
+        let st = parse_legacy_json("{}").unwrap();
+        assert_eq!(st.chain_id, CHAIN_ID);
+    }
+
+    #[test]
+    fn parse_legacy_json_non_json_body_is_none() {
+        assert!(parse_legacy_json("not json at all").is_none());
+    }
+
+    // ── parse_status ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_status_dispatches_on_leading_fence() {
+        let cybermark = "---\nheight: 5\n---\n";
+        assert_eq!(parse_status(cybermark).unwrap().latest_height, 5);
+        let json = r#"{"latest_block_height":"5"}"#;
+        assert_eq!(parse_status(json).unwrap().latest_height, 5);
+    }
+
+    #[test]
+    fn parse_status_unrecognized_body_is_none() {
+        assert!(parse_status("neither fence nor brace").is_none());
+    }
+}

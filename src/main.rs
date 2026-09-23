@@ -1,449 +1,527 @@
-//! Headless native graph client using the common robot and graph owners.
-mod http;
-mod legacy;
-use cyb_core::{
-    GraphSession,
-    native_mirror::Mirror,
-    robot::{
-        self, NetworkRef, Registry, custody,
-        host::{Host, lookup, nonce},
-        remote::{hex, parse_id},
-    },
-};
-use cybergraph::Particle;
-use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
-type Result<T> = std::result::Result<T, String>;
+// ---
+// tags: cyber, cli, rust
+// crystal-type: source
+// crystal-domain: cyber
+// ---
+//! cyber — a small node of the soft3 chaosnet (spacepussy-test).
+//!
+//! Not a probe: `cyber sync` pulls the peer's signal log (native foculus
+//! frames), replays it into a local cybergraph+bbg cell, and recomputes the
+//! root itself — verification by recomputation, no trust in served numbers.
+//! `cyber link` casts a signal as an encoded frame. HTTP is the last
+//! borrowed piece; radio replaces it as transport next.
+
+use std::env;
+use std::io::Read;
+use std::path::PathBuf;
+use std::process;
+
+use cybergraph::{Cybergraph, CyberlinkRecord, NeuronId, Particle, Signal, SELF_NETWORK};
+use foculus::{decode_events, encode_signal_frame, CyberFrame};
+
 const DEFAULT_RPC: &str = "https://cyb.ai/spacepussy-test";
-const CHAIN: &str = "spacepussy-test";
-fn error(e: impl std::fmt::Display) -> String {
-    e.to_string()
+const CHAIN_ID: &str = "spacepussy-test";
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+
+    match cmd {
+        "" | "status" => cmd_status(),
+        "sync" => cmd_sync(rpc_from_args(&args[1..])),
+        "link" => cmd_link(&args[1..]),
+        "network" | "net" => {
+            println!("network {CHAIN_ID}");
+            println!("  role     soft3 chaosnet (cybergraph+bbg)");
+            println!("  rpc      {DEFAULT_RPC}");
+            println!("  status   {DEFAULT_RPC}/status");
+            println!("  denom    testpussy");
+            println!("  node     soft3 node --bind 127.0.0.1:7780");
+        }
+        "help" | "--help" | "-h" | "?" => print_help(),
+        "version" | "--version" | "-V" => {
+            println!(
+                "cyber {} (true-cyber) · soft3 network {CHAIN_ID}",
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        "query" | "tx" | "keys" | "start" | "tendermint" => {
+            eprintln!("this is true-cyber (soft3 cell), not cosmos go-cyber.");
+            eprintln!("  cyber sync          # replicate + verify spacepussy-test");
+            eprintln!("  soft3 node          # run a full soft3 node");
+            process::exit(2);
+        }
+        other => {
+            eprintln!("unknown `{other}` — try `cyber help`");
+            process::exit(2);
+        }
+    }
 }
 
-struct Options {
-    words: Vec<String>,
-    flags: BTreeMap<String, String>,
+// ── the local cell ──────────────────────────────────────────────────────────
+
+/// Where this cyber keeps its slice of the graph ($CYBER_HOME overrides).
+fn cell_home() -> PathBuf {
+    if let Some(h) = env::var_os("CYBER_HOME") {
+        return PathBuf::from(h);
+    }
+    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".cyber").join(CHAIN_ID)
 }
-impl Options {
-    fn parse(args: impl IntoIterator<Item = String>) -> Result<Self> {
-        let mut args = args.into_iter();
-        let mut words = Vec::new();
-        let mut flags = BTreeMap::new();
-        while let Some(arg) = args.next() {
-            if arg.starts_with("--") && !matches!(arg.as_str(), "--help" | "--version") {
-                if !matches!(
-                    arg.as_str(),
-                    "--home"
-                        | "--rpc"
-                        | "--network"
-                        | "--attachment"
-                        | "--request"
-                        | "--amount"
-                        | "--valence"
-                ) {
-                    return Err(format!(
-                        "unsupported option {arg}; --neuron labels cannot authorize a signal"
-                    ));
-                }
-                let value = args
-                    .next()
-                    .ok_or_else(|| format!("missing value for {arg}"))?;
-                if value.starts_with("--") || value.is_empty() {
-                    return Err(format!("missing value for {arg}"));
-                }
-                if flags.insert(arg.clone(), value).is_some() {
-                    return Err(format!("duplicate option {arg}"));
-                }
-            } else {
-                words.push(arg);
-            }
-        }
-        Ok(Self { words, flags })
-    }
-    fn value(&self, key: &str) -> Option<&str> {
-        self.flags.get(key).map(String::as_str)
-    }
-    fn allow(&self, allowed: &[&str]) -> Result<()> {
-        for flag in self.flags.keys() {
-            if flag != "--home" && !allowed.contains(&flag.as_str()) {
-                return Err(format!("{flag} does not apply to this command"));
-            }
-        }
-        Ok(())
-    }
-    fn network(&self) -> Result<Particle> {
-        parse_id(
-            self.value("--network")
-                .ok_or("an explicit full --network ID is required")?,
-        )
-    }
-    fn endpoint(&self) -> Result<http::Http> {
-        http::Http::new(self.value("--rpc").unwrap_or(DEFAULT_RPC), self.network()?)
-    }
-    fn home(&self) -> Result<PathBuf> {
-        if let Some(home) = self.value("--home") {
-            return Ok(home.into());
-        }
-        if let Some(home) = std::env::var_os("CYBER_HOME") {
-            return Ok(home.into());
-        }
-        Ok(
-            PathBuf::from(std::env::var_os("HOME").ok_or("HOME or CYBER_HOME is required")?)
-                .join(".cyber")
-                .join(CHAIN),
-        )
-    }
-}
-struct Client {
-    session: GraphSession,
-    registry: Registry,
-    host: Host,
-}
-impl Client {
-    fn open(home: &Path) -> Result<Self> {
-        let session = GraphSession::open(home.join("log")).map_err(error)?;
-        let registry = Registry::from_database(session.database())?;
-        let host = Host::new(
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.into()),
-            home.into(),
-            "true-cyber".into(),
-        )?;
-        for warning in host.initialize(&registry)?.warnings {
-            eprintln!("{warning}");
-        }
-        Ok(Self {
-            session,
-            registry,
-            host,
-        })
-    }
-    fn sync(&mut self, transport: &mut http::Http) -> Result<usize> {
-        let mirror = Mirror::new(transport.network);
-        let mut count = 0;
-        for _ in 0..4096 {
-            let page = transport.history(mirror.cursor(&self.session)?)?;
-            let progress = mirror.ingest(&mut self.session, &page)?;
-            count += progress.observations;
-            if progress.observations == 0 {
-                return Ok(count);
-            }
-        }
-        Err(format!(
-            "sync reached 4096 pages; {count} observations persisted; run sync again"
-        ))
-    }
-    fn attachment(&self, options: &Options) -> Result<robot::Attachment> {
-        let id = lookup(
-            &self.registry,
-            options.value("--attachment").unwrap_or("selected"),
-        )?;
-        let a = self
-            .registry
-            .robot()?
-            .attachment(id)
-            .cloned()
-            .ok_or("attachment missing")?;
-        if a.binding.network != NetworkRef::Native(options.network()?) {
-            return Err("attachment network differs from explicit destination".into());
-        }
-        a.binding
-            .subject
-            .native()
-            .ok_or("native link requires a native subject")?;
-        Ok(a)
-    }
-    fn relay(&self, attachment: Particle, transport: &mut http::Http) -> Result<usize> {
-        let a = self
-            .registry
-            .robot()?
-            .attachment(attachment)
-            .cloned()
-            .ok_or("attachment missing")?;
-        if a.binding.network != NetworkRef::Native(transport.network) {
-            return Err("outbox network mismatch".into());
-        }
-        // Missing custody may still permit read-only lookup of an accepted action.
-        let key = a
-            .key_ref
-            .as_deref()
-            .and_then(|p| custody::load(Path::new(p)).ok());
-        let mut count = 0;
-        for (position, action) in self.registry.native_page(attachment)? {
-            if let Some(envelope) = action {
-                self.registry.deliver_native(
-                    envelope.action.request,
-                    key.as_ref().map(|k| k.handle.as_ref()),
-                    transport.network,
-                    transport,
-                )?;
-                if envelope.action.kind == "native/signal" {
-                    self.registry
-                        .reconcile_signal(&self.session, envelope.action.request)?;
-                }
-                count += 1;
-            }
-            self.registry.advance_native_cursor(attachment, position)?;
-        }
-        Ok(count)
-    }
-    fn link(&mut self, options: &Options, from: &str, to: &str) -> Result<()> {
-        let a = self.attachment(options)?;
-        let subject = a
-            .binding
-            .subject
-            .native()
-            .ok_or("native subject required")?;
-        let from = particle(from)?;
-        let to = particle(to)?;
-        let amount = options
-            .value("--amount")
-            .unwrap_or("1")
-            .parse::<u64>()
-            .map_err(error)?;
-        if amount == 0 {
-            return Err("amount must be positive".into());
-        }
-        let valence = options
-            .value("--valence")
-            .unwrap_or("0")
-            .parse::<i8>()
-            .map_err(error)?;
-        let request = match options.value("--request") {
-            Some(id) => parse_id(id)?,
-            None => nonce()?,
-        };
-        println!("request {}", hex(&request));
-        use std::io::Write;
-        std::io::stdout().flush().map_err(error)?;
-        let mut transport = options.endpoint()?;
-        // Establish the pinned profile before any new local admission.
-        transport.verify()?;
-        let original = self.registry.admitted(request)?;
-        if let Some(action) = &original {
-            let signal = foculus::signal_codec::decode_signal(&action.payload).map_err(error)?;
-            if action.kind != "native/signal"
-                || action.attachment != a.id
-                || action.context.subject.native() != Some(subject)
-                || action.context.network != NetworkRef::Native(transport.network)
-                || signal.neuron != subject
-                || signal.network != transport.network
-                || signal.links.len() != 1
-                || !signal.delta_pi.is_empty()
-                || !signal.box_moves.is_empty()
-                || signal.proof.is_some()
-                || {
-                    let l = &signal.links[0];
-                    (l.neuron, l.from, l.to, l.token, l.amount, l.valence)
-                        != (subject, from, to, [0; 32], amount, valence)
-                }
-            {
-                return Err("request conflicts with its original link/scope".into());
-            }
-        }
-        if self.registry.attempt(request)?.is_none() {
-            self.sync(&mut transport)?;
-            // New independent sends cannot leap over a pending earlier sequence.
-            let mut exhausted = true;
-            for _ in 0..4096 {
-                let page = self.registry.native_page(a.id)?;
-                if page.is_empty() {
-                    exhausted = false;
-                    break;
-                }
-                for (position, action) in page {
-                    if let Some(action) = action {
-                        if self
-                            .registry
-                            .native_receipt(action.action.request)?
-                            .is_none()
-                        {
-                            return Err(format!(
-                                "resolve prior request {} with relay before a new link",
-                                hex(&action.action.request)
-                            ));
-                        }
+
+/// Replay the local log into a fresh graph. Canon: one signal, one block —
+/// every applied signal is followed by a finalize, matching the node's own
+/// live order and replay exactly.
+fn replay(home: &PathBuf) -> (Cybergraph, u64) {
+    let mut g = Cybergraph::new();
+    let mut signals = 0u64;
+    if let Ok(bytes) = std::fs::read(home.join("log")) {
+        for frame in decode_events(&bytes) {
+            match frame {
+                CyberFrame::Signal(s) => {
+                    if g.link(s).is_ok() {
+                        g.bbg.finalize_block();
+                        signals += 1;
                     }
-                    self.registry.advance_native_cursor(a.id, position)?;
+                }
+                CyberFrame::Intent(i) => {
+                    let _ = g.bbg.apply_intent(&i);
                 }
             }
-            if exhausted {
-                return Err("outbox scan reached page limit; relay and retry".into());
-            }
-            let key = custody::load(Path::new(
-                a.key_ref.as_deref().ok_or("attachment has no custody")?,
-            ))?;
-            let signal = if let Some(action) = original {
-                foculus::signal_codec::decode_signal(&action.payload).map_err(error)?
+        }
+    }
+    (g, signals)
+}
+
+fn cmd_status() {
+    let home = cell_home();
+    let (g, signals) = replay(&home);
+    println!(
+        "cyber {}  ·  {CHAIN_ID}  ·  soft3 cell",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("  cell   {}", home.display());
+    println!(
+        "  held   height {} · {} signals · {} particles · {} axons",
+        g.bbg.state.height,
+        signals,
+        g.bbg.state.particles.len(),
+        g.bbg.state.axons_out.len()
+    );
+    println!("  root   {}", hex(&g.bbg.state.root()));
+    println!("  rpc    {DEFAULT_RPC}");
+    println!("  run    cyber sync · cyber link <from> <to>");
+}
+
+// ── sync: pull, replay, verify ──────────────────────────────────────────────
+
+fn cmd_sync(rpc: String) {
+    let base = rpc.trim_end_matches('/').to_string();
+    println!("cyber sync · {CHAIN_ID}");
+    println!("  rpc              {base}");
+    let st = match probe(&base) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("  reachable        no");
+            println!("  detail           {e}");
+            println!();
+            println!("  which cyber && cyber version   # expect true-cyber");
+            println!("  curl -sS {base}/status | head");
+            println!("  cargo install soft3 true-cyber --force");
+            process::exit(1);
+        }
+    };
+    println!("  reachable        yes");
+    if !st.engine.is_empty() {
+        println!("  engine           {}", st.engine);
+    }
+    if !st.moniker.is_empty() {
+        println!("  moniker          {}", st.moniker);
+    }
+
+    // pull the peer's new frames into the cell
+    let home = cell_home();
+    let _ = std::fs::create_dir_all(&home);
+    let log_path = home.join("log");
+    let held = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+    let mut replicated = true;
+    match http_get_bytes(&format!("{base}/log?from={held}")) {
+        Ok(bytes) if bytes.is_empty() => println!("  pulled           nothing new"),
+        Ok(bytes) => {
+            let frames = decode_events(&bytes).len();
+            if frames == 0 {
+                println!("  pulled           {} undecodable bytes — ignored", bytes.len());
             } else {
-                let mut signal =
-                    self.session
-                        .prepare_signal(subject, transport.network, [(from, to, amount)]);
-                signal.links[0].valence = valence;
-                signal
-            };
-            self.registry.publish_signal(
-                &mut self.session,
-                &key.handle,
-                a.id,
-                a.binding.revision,
-                request,
-                signal,
-            )?;
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    let _ = f.write_all(&bytes);
+                }
+                println!("  pulled           {frames} frames · {} bytes", bytes.len());
+            }
         }
-        self.registry.reconcile_signal(&self.session, request)?;
-        let key = a
-            .key_ref
-            .as_deref()
-            .and_then(|p| custody::load(Path::new(p)).ok());
-        let receipt = self.registry.deliver_native(
-            request,
-            key.as_ref().map(|k| k.handle.as_ref()),
-            transport.network,
-            &mut transport,
-        )?;
-        self.sync(&mut transport)?;
-        self.registry.reconcile_signal(&self.session, request)?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&receipt.value).map_err(error)?
-        );
-        Ok(())
+        Err(e) => {
+            replicated = false;
+            println!("  pulled           none — peer serves no /log ({e})");
+        }
     }
-    fn status(&self, home: &Path) -> Result<()> {
-        let graph = self.session.graph();
-        println!("{}",serde_json::to_string_pretty(&json!({
-            "schema":"true-cyber/status/1", "home":home,"profile":"local graph projection",
-            "height":self.session.node().height(),"local_root":hex(&graph.bbg.state.root()),
-            "neurons":graph.chains.len(),"signals":graph.chains.values().map(|c|c.entries.len()).sum::<usize>(),
-            "particles":graph.bbg.state.particles.len(),"axons":graph.bbg.state.axons_out.len(),
-            "attachments":self.registry.robot()?.attachments.len(),"legacy":legacy::inspect(home)?,
-            "consensus_verified":false
-        })).map_err(error)?);
-        Ok(())
+    // replay everything we hold; the root is ours, not the peer's word
+    let (g, signals) = replay(&home);
+    let local_root = hex(&g.bbg.state.root());
+    println!("  cell             {}", home.display());
+    println!("  height           {}", g.bbg.state.height);
+    println!("  signals          {signals}");
+    println!("  particles        {}", g.bbg.state.particles.len());
+    println!("  axons            {}", g.bbg.state.axons_out.len());
+    if !replicated {
+        println!("  root(peer)       {}", st.bbg_root);
+        println!("  verified         no replication — upgrade the peer to soft3 >=0.8");
+        return;
+    }
+    if st.bbg_root.is_empty() || local_root == st.bbg_root {
+        println!("  root             {local_root}");
+        println!("  verified         yes — recomputed from {signals} signals locally");
+    } else {
+        println!("  root(local)      {local_root}");
+        println!("  root(peer)       {}", st.bbg_root);
+        println!("  verified         NO — replay disagrees with the peer's claim");
+        process::exit(1);
     }
 }
-fn particle(text: &str) -> Result<Particle> {
-    if text.is_empty() || text.len() > 65536 {
-        return Err("particle label must contain 1..65536 bytes".into());
+
+// ── link: cast a native signal frame ────────────────────────────────────────
+
+fn cmd_link(args: &[String]) {
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    if positional.len() < 2 {
+        eprintln!("usage: cyber link <from> <to> [--neuron X] [--amount N] [--valence V] [--rpc URL]");
+        process::exit(2);
     }
-    let candidate = text.strip_prefix("0x").unwrap_or(text);
-    if !candidate.is_empty()
-        && candidate.len() <= 64
-        && candidate.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        return parse_id(&format!("{candidate:0>64}"));
+    let from = positional[0];
+    let to = positional[1];
+    let neuron = flag_value(args, "--neuron").unwrap_or_else(|| "01".into());
+    let amount: u64 = flag_value(args, "--amount")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let valence: i8 = flag_value(args, "--valence")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let base = rpc_from_args(args).trim_end_matches('/').to_string();
+
+    // refresh the cell first — step/prev chain against current peer state
+    let home = cell_home();
+    let _ = std::fs::create_dir_all(&home);
+    if let Ok(bytes) = http_get_bytes(&format!(
+        "{base}/log?from={}",
+        std::fs::metadata(home.join("log")).map(|m| m.len()).unwrap_or(0)
+    )) {
+        if !bytes.is_empty() && !decode_events(&bytes).is_empty() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(home.join("log"))
+            {
+                let _ = f.write_all(&bytes);
+            }
+        }
     }
-    Ok(*hemera::hash(text.as_bytes()).as_bytes())
+    let (g, _) = replay(&home);
+
+    let n = match key32(&neuron) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("bad neuron: {e}");
+            process::exit(2);
+        }
+    };
+    let f = key32(from).unwrap_or([0u8; 32]);
+    let t = key32(to).unwrap_or([0u8; 32]);
+    let (step, prev) = next_pos(&g, &n);
+    let signal = Signal {
+        neuron: n,
+        network: SELF_NETWORK,
+        links: vec![CyberlinkRecord {
+            neuron: n,
+            from: f,
+            to: t,
+            token: [0u8; 32],
+            amount,
+            valence,
+            height: 0,
+        }],
+        delta_pi: vec![],
+        box_moves: vec![],
+        prev,
+        step,
+        height: 0,
+        proof: None,
+    };
+    let frame = encode_signal_frame(&signal);
+    println!("cyber link · {CHAIN_ID}");
+    println!("  frame            {} bytes (foculus)", frame.len());
+    match http_post_bytes(&format!("{base}/v1/frame"), &frame) {
+        Ok(receipt) => {
+            for line in receipt.lines() {
+                let l = line.trim();
+                if l != "---" && !l.is_empty() {
+                    println!("  {l}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("  rejected         {e}");
+            process::exit(1);
+        }
+    }
+    // pull our own signal back and re-verify
+    cmd_sync(base);
 }
-fn run(options: Options) -> Result<()> {
-    let words: Vec<_> = options.words.iter().map(String::as_str).collect();
-    match words.as_slice() {
-        ["help" | "--help" | "-h" | "?"] => {
-            options.allow(&[])?;
-            println!("{}", include_str!("help.txt"));
-            return Ok(());
+
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+fn rpc_from_args(args: &[String]) -> String {
+    let mut rpc = DEFAULT_RPC.to_string();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--rpc" {
+            i += 1;
+            if let Some(u) = args.get(i) {
+                rpc = u.clone();
+            }
+        } else if args[i] == "--network" || args[i] == "-n" {
+            i += 1;
+            let name = args.get(i).map(|s| s.as_str()).unwrap_or("");
+            if matches!(
+                name,
+                "space-pussy" | "spacepussy" | "pussy" | "sp" | "bostrom" | "boot"
+            ) {
+                eprintln!("`{name}` is cosmos bootloader — not soft3 spacepussy-test.");
+                eprintln!("product: {CHAIN_ID} @ {DEFAULT_RPC}");
+                process::exit(2);
+            }
         }
-        ["version" | "--version" | "-V"] => {
-            options.allow(&[])?;
-            println!("cyber {} (true-cyber)", env!("CARGO_PKG_VERSION"));
-            return Ok(());
-        }
-        ["network" | "net"] => {
-            options.allow(&[])?;
-            println!(
-                "default transport {DEFAULT_RPC}\nnative profile {}\nnetwork identity requires explicit --network HEX; obtain it from your trusted genesis",
-                robot::remote::PROFILE
-            );
-            return Ok(());
-        }
-        _ => {}
+        i += 1;
     }
-    // Validate command/flags before opening (and potentially importing) storage.
-    match words.as_slice() {
-        [] | ["status"] | ["neuron", ..] | ["legacy", "inspect"] | ["legacy", "export", _] => {
-            options.allow(&[])?
-        }
-        ["sync"] => options.allow(&["--network", "--rpc"])?,
-        ["relay"] => options.allow(&["--network", "--rpc", "--attachment"])?,
-        ["receipt", _] => options.allow(&["--network", "--rpc"])?,
-        ["link", _, _] => options.allow(&[
-            "--network",
-            "--rpc",
-            "--attachment",
-            "--request",
-            "--amount",
-            "--valence",
-        ])?,
-        _ => return Err("unknown command or missing arguments; cyber help".into()),
+    rpc
+}
+
+// ── identity (same rules as the node: hex or hemera-hash of the label) ──────
+
+fn key32(s: &str) -> Result<Particle, String> {
+    if let Some(p) = parse_hex32(s) {
+        return Ok(p);
     }
-    let home = options.home()?;
-    if words.first() == Some(&"legacy") {
-        match words.as_slice() {
-            [_, "inspect"] => println!(
-                "{}",
-                serde_json::to_string_pretty(&legacy::inspect(&home)?).map_err(error)?
-            ),
-            [_, "export", path] => legacy::export(&home, Path::new(path))?,
-            _ => unreachable!(),
-        }
-        return Ok(());
+    let h = hemera::hash(s.as_bytes());
+    let b = h.as_bytes();
+    let mut out = [0u8; 32];
+    out[..b.len().min(32)].copy_from_slice(&b[..b.len().min(32)]);
+    Ok(out)
+}
+
+fn parse_hex32(s: &str) -> Option<Particle> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if s.is_empty() || s.len() > 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
     }
-    if matches!(
-        words.first().copied(),
-        Some("sync" | "relay" | "receipt" | "link")
-    ) {
-        options.network()?;
+    let padded = format!("{s:0>64}");
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&padded[i * 2..i * 2 + 2], 16).ok()?;
     }
-    let mut client = Client::open(&home)?;
-    match words.as_slice() {
-        [] | ["status"] => client.status(&home),
-        ["neuron", tail @ ..] => {
-            println!("{}", client.host.execute(&client.registry, tail)?);
-            Ok(())
+    Some(out)
+}
+
+fn next_pos(cg: &Cybergraph, neuron: &NeuronId) -> (u64, Particle) {
+    match cg.chains.get(neuron) {
+        Some(chain) if !chain.entries.is_empty() => {
+            let step = chain.entries.len() as u64;
+            let prev = chain.entries[&(step - 1)].hash();
+            (step, prev)
         }
-        ["sync"] => {
-            let mut transport = options.endpoint()?;
-            println!(
-                "{} endpoint observations retained; local projection, not consensus finality",
-                client.sync(&mut transport)?
-            );
-            Ok(())
-        }
-        ["relay"] => {
-            let a = client.attachment(&options)?;
-            let mut transport = options.endpoint()?;
-            println!(
-                "{} original requests accepted",
-                client.relay(a.id, &mut transport)?
-            );
-            client.sync(&mut transport)?;
-            Ok(())
-        }
-        ["receipt", request] => {
-            let request = parse_id(request)?;
-            let mut transport = options.endpoint()?;
-            let receipt =
-                client
-                    .registry
-                    .deliver_native(request, None, transport.network, &mut transport)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&receipt.value).map_err(error)?
-            );
-            Ok(())
-        }
-        ["link", from, to] => client.link(&options, from, to),
-        _ => unreachable!(),
+        _ => (0, [0u8; 32]),
     }
 }
-fn main() {
-    if let Err(e) = Options::parse(std::env::args().skip(1)).and_then(run) {
-        eprintln!("cyber: {e}");
-        std::process::exit(1);
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ── status wire (cybermark particle; legacy JSON tolerated) ─────────────────
+
+struct Status {
+    chain_id: String,
+    moniker: String,
+    engine: String,
+    latest_height: u64,
+    bbg_root: String,
+    signals: u64,
+    particles: u64,
+    axons: u64,
+    catching_up: bool,
+}
+
+impl Status {
+    fn empty() -> Self {
+        Status {
+            chain_id: String::new(),
+            moniker: String::new(),
+            engine: String::new(),
+            latest_height: 0,
+            bbg_root: String::new(),
+            signals: 0,
+            particles: 0,
+            axons: 0,
+            catching_up: false,
+        }
     }
+}
+
+fn probe(base: &str) -> Result<Status, String> {
+    let url = format!("{base}/status");
+    let (code, body) = http_get(&url)?;
+    if code >= 500 {
+        return Err(format!("http {code} from {url}"));
+    }
+    parse_status(&body).ok_or_else(|| format!("unparsed status from {url}"))
+}
+
+/// The native wire is a cybermark particle — frontmatter `key: value` lines
+/// between `---` fences. Nodes still on soft3 <0.7 answer in JSON; a tiny
+/// string extractor keeps them readable through the transition.
+fn parse_status(body: &str) -> Option<Status> {
+    if body.trim_start().starts_with("---") {
+        parse_cybermark(body)
+    } else {
+        parse_legacy_json(body)
+    }
+}
+
+fn parse_cybermark(body: &str) -> Option<Status> {
+    let mut s = Status::empty();
+    let mut in_frontmatter = false;
+    let mut fields = 0u32;
+    for line in body.lines() {
+        let t = line.trim();
+        if t == "---" {
+            if in_frontmatter {
+                break;
+            }
+            in_frontmatter = true;
+            continue;
+        }
+        if !in_frontmatter {
+            continue;
+        }
+        let Some((k, v)) = t.split_once(':') else {
+            continue;
+        };
+        let v = v.trim();
+        fields += 1;
+        match k.trim() {
+            "chain" => s.chain_id = v.into(),
+            "moniker" => s.moniker = v.into(),
+            "engine" => s.engine = v.into(),
+            "height" => s.latest_height = v.parse().unwrap_or(0),
+            "bbg-root" => s.bbg_root = v.into(),
+            "signals" => s.signals = v.parse().unwrap_or(0),
+            "particles" => s.particles = v.parse().unwrap_or(0),
+            "axons" => s.axons = v.parse().unwrap_or(0),
+            "catching-up" => s.catching_up = v == "true",
+            _ => fields -= 1,
+        }
+    }
+    (fields > 0).then_some(s)
+}
+
+/// Pull the few known fields out of the pre-0.7 JSON status with plain string
+/// search — enough for our own emitter, no JSON dependency.
+fn parse_legacy_json(body: &str) -> Option<Status> {
+    if !body.trim_start().starts_with('{') {
+        return None;
+    }
+    let field = |key: &str| -> Option<String> {
+        let probe = format!("\"{key}\"");
+        let at = body.find(&probe)? + probe.len();
+        let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
+        if let Some(r) = rest.strip_prefix('"') {
+            Some(r[..r.find('"')?].to_string())
+        } else {
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+                .unwrap_or(rest.len());
+            Some(rest[..end].to_string())
+        }
+    };
+    let num = |key: &str| field(key).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut s = Status::empty();
+    s.chain_id = field("network").unwrap_or_else(|| CHAIN_ID.into());
+    s.moniker = field("moniker").unwrap_or_default();
+    s.engine = field("engine").or_else(|| field("protocol")).unwrap_or_default();
+    s.latest_height = num("latest_block_height");
+    s.bbg_root = field("bbg_root").unwrap_or_default();
+    s.signals = num("signals");
+    s.particles = num("particles");
+    s.axons = num("axons");
+    s.catching_up = field("catching_up").as_deref() == Some("true");
+    Some(s)
+}
+
+// ── http (the last borrowed transport — radio replaces it) ──────────────────
+
+fn http_get(url: &str) -> Result<(u16, String), String> {
+    let resp = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(12))
+        .call()
+        .map_err(|e| format!("{e}"))?;
+    let code = resp.status();
+    let body = resp.into_string().map_err(|e| format!("body: {e}"))?;
+    Ok((code, body))
+}
+
+fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let resp = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+        .map_err(|e| format!("{e}"))?;
+    let mut out = Vec::new();
+    resp.into_reader()
+        .take(256 * 1024 * 1024)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("read: {e}"))?;
+    Ok(out)
+}
+
+fn http_post_bytes(url: &str, bytes: &[u8]) -> Result<String, String> {
+    let resp = ureq::post(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .set("content-type", "application/octet-stream")
+        .send_bytes(bytes)
+        .map_err(|e| format!("{e}"))?;
+    resp.into_string().map_err(|e| format!("body: {e}"))
+}
+
+fn print_help() {
+    println!(
+        "cyber {} — a small node of soft3 spacepussy-test",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!();
+    println!("  cargo install true-cyber");
+    println!("  cyber sync                     # pull frames, replay, verify the root yourself");
+    println!("  cyber link <from> <to>         # cast a cyberlink as a native frame");
+    println!("  cyber status                   # your local cell");
+    println!("  cyber network");
+    println!();
+    println!("  the full node is soft3:");
+    println!("    cargo install soft3");
+    println!("    soft3 node --bind 127.0.0.1:7780");
 }

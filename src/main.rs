@@ -759,4 +759,96 @@ mod tests {
     fn parse_status_unrecognized_body_is_none() {
         assert!(parse_status("neither fence nor brace").is_none());
     }
+
+    // ── replay / next_pos ────────────────────────────────────────────────
+
+    fn temp_home(tag: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "true-cyber-test-{tag}-{}-{:?}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn a_signal(neuron: Particle, step: u64, prev: Particle) -> Signal {
+        Signal {
+            neuron,
+            network: SELF_NETWORK,
+            links: vec![CyberlinkRecord {
+                neuron,
+                from: [1u8; 32],
+                to: [2u8; 32],
+                token: [0u8; 32],
+                amount: 1,
+                valence: 0,
+                height: 0,
+            }],
+            delta_pi: vec![],
+            box_moves: vec![],
+            prev,
+            step,
+            height: 0,
+            proof: None,
+        }
+    }
+
+    #[test]
+    fn replay_missing_log_yields_empty_graph() {
+        let home = temp_home("missing-log");
+        let (g, signals) = replay(&home);
+        assert_eq!(signals, 0);
+        assert_eq!(g.bbg.state.height, 0);
+        assert!(g.chains.is_empty());
+    }
+
+    #[test]
+    fn replay_applies_an_encoded_signal_frame() {
+        let home = temp_home("one-signal");
+        let neuron = [7u8; 32];
+        let signal = a_signal(neuron, 0, [0u8; 32]);
+        let frame = encode_signal_frame(&signal);
+        std::fs::write(home.join("log"), &frame).unwrap();
+
+        let (g, signals) = replay(&home);
+        assert_eq!(signals, 1);
+        assert_eq!(g.bbg.state.height, 1);
+        assert_eq!(next_pos(&g, &neuron).0, 1);
+    }
+
+    #[test]
+    fn replay_ignores_undecodable_bytes_without_panicking() {
+        let home = temp_home("garbage");
+        std::fs::write(home.join("log"), b"not a valid foculus frame stream").unwrap();
+        let (g, signals) = replay(&home);
+        assert_eq!(signals, 0);
+        assert_eq!(g.bbg.state.height, 0);
+    }
+
+    #[test]
+    fn next_pos_unknown_neuron_starts_at_zero() {
+        let g = Cybergraph::new();
+        let (step, prev) = next_pos(&g, &[9u8; 32]);
+        assert_eq!(step, 0);
+        assert_eq!(prev, [0u8; 32]);
+    }
+
+    #[test]
+    fn next_pos_after_one_signal_advances_and_chains_the_hash() {
+        let home = temp_home("next-pos-chain");
+        let neuron = [8u8; 32];
+        let signal = a_signal(neuron, 0, [0u8; 32]);
+        let expected_prev = signal.hash();
+        let frame = encode_signal_frame(&signal);
+        std::fs::write(home.join("log"), &frame).unwrap();
+
+        let (g, _) = replay(&home);
+        let (step, prev) = next_pos(&g, &neuron);
+        assert_eq!(step, 1);
+        assert_eq!(prev, expected_prev);
+    }
 }

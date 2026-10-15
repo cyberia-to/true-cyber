@@ -1,24 +1,27 @@
-//! Headless native graph client using the common robot and graph owners.
-mod http;
-mod legacy;
-use cyb_core::{
-    GraphSession,
-    native_mirror::Mirror,
-    robot::{
-        self, NetworkRef, Registry, custody,
-        host::{Host, lookup, nonce},
-        remote::{hex, parse_id},
-    },
-};
-use cybergraph::Particle;
-use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+//! cyber — the phase-1 root chain client (soft3/specs/chain.md).
+//!
+//! Three things a neuron can do — transfer, cyberlink, claim — signed with
+//! the key the spell derives and submitted to a chain node over the HTTP
+//! surface of chain-wire §7. Encoding and signing are `soft3::wallet`; this
+//! binary is the command line around it.
+
+mod spell;
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use soft3::wallet::{self, hex, Client, Kind, SignedTx, Signer, Tx, TxStatus};
+
 type Result<T> = std::result::Result<T, String>;
-const DEFAULT_RPC: &str = "https://cyb.ai/spacepussy-test";
-const CHAIN: &str = "spacepussy-test";
+
+const DEFAULT_RPC: &str = "https://cyb.ai/pussy";
+const FLAGS: &[&str] = &[
+    "--rpc", "--chain-id", "--spell", "--home", "--hrp", "--token", "--fee", "--nonce", "--amount",
+    "--valence", "--after", "--limit", "--wait",
+];
+const SWITCHES: &[&str] = &["--json", "--no-wait", "--help", "--version"];
+
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -26,421 +29,307 @@ fn error(e: impl std::fmt::Display) -> String {
 struct Options {
     words: Vec<String>,
     flags: BTreeMap<String, String>,
+    switches: Vec<String>,
 }
+
 impl Options {
     fn parse(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let mut args = args.into_iter();
-        let mut words = Vec::new();
-        let mut flags = BTreeMap::new();
+        let (mut words, mut flags, mut switches) = (Vec::new(), BTreeMap::new(), Vec::new());
         while let Some(arg) = args.next() {
-            if arg.starts_with("--") && !matches!(arg.as_str(), "--help" | "--version") {
-                if !matches!(
-                    arg.as_str(),
-                    "--home"
-                        | "--rpc"
-                        | "--network"
-                        | "--attachment"
-                        | "--request"
-                        | "--amount"
-                        | "--valence"
-                ) {
-                    return Err(format!(
-                        "unsupported option {arg}; --neuron labels cannot authorize a signal"
-                    ));
-                }
-                let value = args
-                    .next()
-                    .ok_or_else(|| format!("missing value for {arg}"))?;
-                if value.starts_with("--") || value.is_empty() {
-                    return Err(format!("missing value for {arg}"));
-                }
+            if SWITCHES.contains(&arg.as_str()) {
+                switches.push(arg);
+            } else if let Some((k, v)) = arg.split_once('=').filter(|(k, _)| FLAGS.contains(k)) {
+                flags.insert(k.to_string(), v.to_string());
+            } else if FLAGS.contains(&arg.as_str()) {
+                let value = args.next().ok_or_else(|| format!("missing value for {arg}"))?;
                 if flags.insert(arg.clone(), value).is_some() {
                     return Err(format!("duplicate option {arg}"));
                 }
+            } else if arg.starts_with("--") {
+                return Err(format!("unsupported option {arg}; cyber help"));
             } else {
                 words.push(arg);
             }
         }
-        Ok(Self { words, flags })
+        Ok(Self { words, flags, switches })
     }
+
     fn value(&self, key: &str) -> Option<&str> {
         self.flags.get(key).map(String::as_str)
     }
-    fn allow(&self, allowed: &[&str]) -> Result<()> {
-        for flag in self.flags.keys() {
-            if flag != "--home" && !allowed.contains(&flag.as_str()) {
-                return Err(format!("{flag} does not apply to this command"));
-            }
-        }
-        Ok(())
+
+    fn on(&self, switch: &str) -> bool {
+        self.switches.iter().any(|s| s == switch)
     }
-    fn network(&self) -> Result<Particle> {
-        parse_id(
-            self.value("--network")
-                .ok_or("an explicit full --network ID is required")?,
-        )
+
+    fn u64(&self, key: &str) -> Result<Option<u64>> {
+        self.value(key)
+            .map(|v| v.parse::<u64>().map_err(|_| format!("{key} must be an integer, got {v:?}")))
+            .transpose()
     }
-    fn endpoint(&self) -> Result<http::Http> {
-        http::Http::new(self.value("--rpc").unwrap_or(DEFAULT_RPC), self.network()?)
+
+    fn rpc(&self) -> String {
+        self.value("--rpc")
+            .map(str::to_string)
+            .or_else(|| std::env::var("CYBER_RPC").ok())
+            .unwrap_or_else(|| DEFAULT_RPC.into())
     }
-    fn home(&self) -> Result<PathBuf> {
-        if let Some(home) = self.value("--home") {
-            return Ok(home.into());
-        }
-        if let Some(home) = std::env::var_os("CYBER_HOME") {
-            return Ok(home.into());
-        }
-        Ok(
-            PathBuf::from(std::env::var_os("HOME").ok_or("HOME or CYBER_HOME is required")?)
-                .join(".cyber")
-                .join(CHAIN),
-        )
+
+    fn client(&self) -> Result<Client> {
+        Client::new(&self.rpc()).map_err(error)
     }
-}
-struct Client {
-    session: GraphSession,
-    registry: Registry,
-    host: Host,
-}
-impl Client {
-    fn open(home: &Path) -> Result<Self> {
-        let session = GraphSession::open(home.join("log")).map_err(error)?;
-        let registry = Registry::from_database(session.database())?;
-        let host = Host::new(
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.into()),
-            home.into(),
-            "true-cyber".into(),
-        )?;
-        for warning in host.initialize(&registry)?.warnings {
-            eprintln!("{warning}");
-        }
-        Ok(Self {
-            session,
-            registry,
-            host,
-        })
+
+    fn chain_id(&self, client: &Client) -> Result<[u8; 32]> {
+        let pinned = match self.value("--chain-id").or(std::env::var("CYBER_CHAIN_ID").ok().as_deref()) {
+            Some(s) => Some(wallet::parse32(s).map_err(error)?),
+            None => None,
+        };
+        client.chain_id(pinned).map_err(error)
     }
-    fn sync(&mut self, transport: &mut http::Http) -> Result<usize> {
-        let mirror = Mirror::new(transport.network);
-        let mut count = 0;
-        for _ in 0..4096 {
-            let page = transport.history(mirror.cursor(&self.session)?)?;
-            let progress = mirror.ingest(&mut self.session, &page)?;
-            count += progress.observations;
-            if progress.observations == 0 {
-                return Ok(count);
-            }
+
+    fn hrp(&self) -> &str {
+        self.value("--hrp").unwrap_or("pussy")
+    }
+
+    fn signer(&self) -> Result<Signer> {
+        let path = spell::path(self.value("--spell"), self.value("--home"))?;
+        let words = spell::read(&path)?;
+        Signer::from_spell(&words, "").map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn token(&self) -> [u8; 32] {
+        wallet::token_arg(self.value("--token").unwrap_or("pussy"))
+    }
+
+    fn wait(&self) -> Option<Duration> {
+        if self.on("--no-wait") {
+            return None;
         }
-        Err(format!(
-            "sync reached 4096 pages; {count} observations persisted; run sync again"
+        Some(Duration::from_secs(
+            self.value("--wait").and_then(|w| w.parse().ok()).unwrap_or(120),
         ))
     }
-    fn attachment(&self, options: &Options) -> Result<robot::Attachment> {
-        let id = lookup(
-            &self.registry,
-            options.value("--attachment").unwrap_or("selected"),
-        )?;
-        let a = self
-            .registry
-            .robot()?
-            .attachment(id)
-            .cloned()
-            .ok_or("attachment missing")?;
-        if a.binding.network != NetworkRef::Native(options.network()?) {
-            return Err("attachment network differs from explicit destination".into());
-        }
-        a.binding
-            .subject
-            .native()
-            .ok_or("native link requires a native subject")?;
-        Ok(a)
+}
+
+fn tx_json(tx: &Tx) -> Value {
+    match tx {
+        Tx::Coinbase { height, to, amount, extra } => json!({
+            "kind": "coinbase", "height": height, "to": hex(to), "amount": amount, "extra": hex(extra)
+        }),
+        Tx::Transfer { from, nonce, token, amount, to, fee } => json!({
+            "kind": "transfer", "from": hex(from), "nonce": nonce, "token": hex(token),
+            "amount": amount, "to": hex(to), "fee": fee
+        }),
+        Tx::Cyberlink { from, nonce, token, amount, p, q, valence, fee } => json!({
+            "kind": "cyberlink", "from": hex(from), "nonce": nonce, "token": hex(token),
+            "amount": amount, "p": hex(p), "q": hex(q), "valence": valence, "fee": fee
+        }),
+        Tx::Claim { account_id, nonce, fee } => json!({
+            "kind": "claim", "account_id": hex(account_id), "nonce": nonce, "fee": fee
+        }),
     }
-    fn relay(&self, attachment: Particle, transport: &mut http::Http) -> Result<usize> {
-        let a = self
-            .registry
-            .robot()?
-            .attachment(attachment)
-            .cloned()
-            .ok_or("attachment missing")?;
-        if a.binding.network != NetworkRef::Native(transport.network) {
-            return Err("outbox network mismatch".into());
-        }
-        // Missing custody may still permit read-only lookup of an accepted action.
-        let key = a
-            .key_ref
-            .as_deref()
-            .and_then(|p| custody::load(Path::new(p)).ok());
-        let mut count = 0;
-        for (position, action) in self.registry.native_page(attachment)? {
-            if let Some(envelope) = action {
-                self.registry.deliver_native(
-                    envelope.action.request,
-                    key.as_ref().map(|k| k.handle.as_ref()),
-                    transport.network,
-                    transport,
-                )?;
-                if envelope.action.kind == "native/signal" {
-                    self.registry
-                        .reconcile_signal(&self.session, envelope.action.request)?;
+}
+
+/// Sign, submit, and (unless `--no-wait`) wait for inclusion; print the receipt.
+fn send(options: &Options, client: &Client, signed: SignedTx) -> Result<()> {
+    let mut receipt = json!({
+        "schema": "cyber/tx-receipt/1",
+        "txid": signed.txid_hex(),
+        "chain": hex(&signed.chain),
+        "bytes": signed.bytes.len(),
+        "tx": tx_json(&signed.tx),
+    });
+    client.submit(&signed).map_err(error)?;
+    receipt["submitted"] = json!(true);
+    if !options.on("--json") {
+        println!("txid {}", signed.txid_hex());
+    }
+    match options.wait() {
+        None => receipt["status"] = json!("submitted"),
+        Some(budget) => match client.wait(&signed.txid, budget).map_err(error)? {
+            TxStatus::Included { height, block, .. } => {
+                receipt["status"] = json!("included");
+                receipt["height"] = json!(height);
+                receipt["block"] = json!(block);
+                if !options.on("--json") {
+                    println!("included at height {height}{}", block.map(|b| format!(" block {b}")).unwrap_or_default());
                 }
-                count += 1;
             }
-            self.registry.advance_native_cursor(attachment, position)?;
-        }
-        Ok(count)
+            other => receipt["status"] = json!(format!("{other:?}")),
+        },
     }
-    fn link(&mut self, options: &Options, from: &str, to: &str) -> Result<()> {
-        let a = self.attachment(options)?;
-        let subject = a
-            .binding
-            .subject
-            .native()
-            .ok_or("native subject required")?;
-        let from = particle(from)?;
-        let to = particle(to)?;
-        let amount = options
-            .value("--amount")
-            .unwrap_or("1")
-            .parse::<u64>()
-            .map_err(error)?;
-        if amount == 0 {
-            return Err("amount must be positive".into());
-        }
-        let valence = options
-            .value("--valence")
-            .unwrap_or("0")
-            .parse::<i8>()
-            .map_err(error)?;
-        let request = match options.value("--request") {
-            Some(id) => parse_id(id)?,
-            None => nonce()?,
+    if options.on("--json") {
+        println!("{}", serde_json::to_string_pretty(&receipt).map_err(error)?);
+    }
+    Ok(())
+}
+
+fn nonce_for(options: &Options, client: &Client, neuron: &[u8; 32]) -> Result<u64> {
+    match options.u64("--nonce")? {
+        Some(n) => Ok(n),
+        None => client.nonce(neuron).map_err(|e| format!("nonce: {e}")),
+    }
+}
+
+fn valence(options: &Options) -> Result<i8> {
+    let v = options.value("--valence").unwrap_or("0");
+    match v {
+        "-1" | "0" | "1" | "+1" => Ok(v.trim_start_matches('+').parse().expect("checked")),
+        _ => Err(format!("--valence must be -1, 0 or 1, got {v:?}")),
+    }
+}
+
+fn tx_command(options: &Options, words: &[&str]) -> Result<()> {
+    let client = options.client()?;
+    if let ["show", txid] = words {
+        let txid = wallet::parse32(txid).map_err(error)?;
+        let status = client.tx(&txid).map_err(error)?;
+        let v = match status {
+            TxStatus::Unknown => json!({"txid": hex(&txid), "status": "unknown"}),
+            TxStatus::Mempool => json!({"txid": hex(&txid), "status": "mempool"}),
+            TxStatus::Included { height, block, tx } => {
+                json!({"txid": hex(&txid), "status": "included", "height": height, "block": block, "tx": tx})
+            }
         };
-        println!("request {}", hex(&request));
-        use std::io::Write;
-        std::io::stdout().flush().map_err(error)?;
-        let mut transport = options.endpoint()?;
-        // Establish the pinned profile before any new local admission.
-        transport.verify()?;
-        let original = self.registry.admitted(request)?;
-        if let Some(action) = &original {
-            let signal = foculus::signal_codec::decode_signal(&action.payload).map_err(error)?;
-            if action.kind != "native/signal"
-                || action.attachment != a.id
-                || action.context.subject.native() != Some(subject)
-                || action.context.network != NetworkRef::Native(transport.network)
-                || signal.neuron != subject
-                || signal.network != transport.network
-                || signal.links.len() != 1
-                || !signal.delta_pi.is_empty()
-                || !signal.box_moves.is_empty()
-                || signal.proof.is_some()
-                || {
-                    let l = &signal.links[0];
-                    (l.neuron, l.from, l.to, l.token, l.amount, l.valence)
-                        != (subject, from, to, [0; 32], amount, valence)
-                }
-            {
-                return Err("request conflicts with its original link/scope".into());
-            }
-        }
-        if self.registry.attempt(request)?.is_none() {
-            self.sync(&mut transport)?;
-            // New independent sends cannot leap over a pending earlier sequence.
-            let mut exhausted = true;
-            for _ in 0..4096 {
-                let page = self.registry.native_page(a.id)?;
-                if page.is_empty() {
-                    exhausted = false;
-                    break;
-                }
-                for (position, action) in page {
-                    if let Some(action) = action {
-                        if self
-                            .registry
-                            .native_receipt(action.action.request)?
-                            .is_none()
-                        {
-                            return Err(format!(
-                                "resolve prior request {} with relay before a new link",
-                                hex(&action.action.request)
-                            ));
-                        }
-                    }
-                    self.registry.advance_native_cursor(a.id, position)?;
-                }
-            }
-            if exhausted {
-                return Err("outbox scan reached page limit; relay and retry".into());
-            }
-            let key = custody::load(Path::new(
-                a.key_ref.as_deref().ok_or("attachment has no custody")?,
-            ))?;
-            let signal = if let Some(action) = original {
-                foculus::signal_codec::decode_signal(&action.payload).map_err(error)?
-            } else {
-                let mut signal =
-                    self.session
-                        .prepare_signal(subject, transport.network, [(from, to, amount)]);
-                signal.links[0].valence = valence;
-                signal
-            };
-            self.registry.publish_signal(
-                &mut self.session,
-                &key.handle,
-                a.id,
-                a.binding.revision,
-                request,
-                signal,
-            )?;
-        }
-        self.registry.reconcile_signal(&self.session, request)?;
-        let key = a
-            .key_ref
-            .as_deref()
-            .and_then(|p| custody::load(Path::new(p)).ok());
-        let receipt = self.registry.deliver_native(
-            request,
-            key.as_ref().map(|k| k.handle.as_ref()),
-            transport.network,
-            &mut transport,
-        )?;
-        self.sync(&mut transport)?;
-        self.registry.reconcile_signal(&self.session, request)?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&receipt.value).map_err(error)?
-        );
-        Ok(())
-    }
-    fn status(&self, home: &Path) -> Result<()> {
-        let graph = self.session.graph();
-        println!("{}",serde_json::to_string_pretty(&json!({
-            "schema":"true-cyber/status/1", "home":home,"profile":"local graph projection",
-            "height":self.session.node().height(),"local_root":hex(&graph.bbg.state.root()),
-            "neurons":graph.chains.len(),"signals":graph.chains.values().map(|c|c.entries.len()).sum::<usize>(),
-            "particles":graph.bbg.state.particles.len(),"axons":graph.bbg.state.axons_out.len(),
-            "attachments":self.registry.robot()?.attachments.len(),"legacy":legacy::inspect(home)?,
-            "consensus_verified":false
-        })).map_err(error)?);
-        Ok(())
-    }
-}
-fn particle(text: &str) -> Result<Particle> {
-    if text.is_empty() || text.len() > 65536 {
-        return Err("particle label must contain 1..65536 bytes".into());
-    }
-    let candidate = text.strip_prefix("0x").unwrap_or(text);
-    if !candidate.is_empty()
-        && candidate.len() <= 64
-        && candidate.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        return parse_id(&format!("{candidate:0>64}"));
-    }
-    Ok(*hemera::hash(text.as_bytes()).as_bytes())
-}
-fn run(options: Options) -> Result<()> {
-    let words: Vec<_> = options.words.iter().map(String::as_str).collect();
-    match words.as_slice() {
-        ["help" | "--help" | "-h" | "?"] => {
-            options.allow(&[])?;
-            println!("{}", include_str!("help.txt"));
-            return Ok(());
-        }
-        ["version" | "--version" | "-V"] => {
-            options.allow(&[])?;
-            println!("cyber {} (true-cyber)", env!("CARGO_PKG_VERSION"));
-            return Ok(());
-        }
-        ["network" | "net"] => {
-            options.allow(&[])?;
-            println!(
-                "default transport {DEFAULT_RPC}\nnative profile {}\nnetwork identity requires explicit --network HEX; obtain it from your trusted genesis",
-                robot::remote::PROFILE
-            );
-            return Ok(());
-        }
-        _ => {}
-    }
-    // Validate command/flags before opening (and potentially importing) storage.
-    match words.as_slice() {
-        [] | ["status"] | ["neuron", ..] | ["legacy", "inspect"] | ["legacy", "export", _] => {
-            options.allow(&[])?
-        }
-        ["sync"] => options.allow(&["--network", "--rpc"])?,
-        ["relay"] => options.allow(&["--network", "--rpc", "--attachment"])?,
-        ["receipt", _] => options.allow(&["--network", "--rpc"])?,
-        ["link", _, _] => options.allow(&[
-            "--network",
-            "--rpc",
-            "--attachment",
-            "--request",
-            "--amount",
-            "--valence",
-        ])?,
-        _ => return Err("unknown command or missing arguments; cyber help".into()),
-    }
-    let home = options.home()?;
-    if words.first() == Some(&"legacy") {
-        match words.as_slice() {
-            [_, "inspect"] => println!(
-                "{}",
-                serde_json::to_string_pretty(&legacy::inspect(&home)?).map_err(error)?
-            ),
-            [_, "export", path] => legacy::export(&home, Path::new(path))?,
-            _ => unreachable!(),
-        }
+        println!("{}", serde_json::to_string_pretty(&v).map_err(error)?);
         return Ok(());
     }
-    if matches!(
-        words.first().copied(),
-        Some("sync" | "relay" | "receipt" | "link")
-    ) {
-        options.network()?;
+    let signer = options.signer()?;
+    let chain = options.chain_id(&client)?;
+    let fee = options.u64("--fee")?;
+    let signed = match words {
+        ["transfer", to, amount] => {
+            let amount = amount.parse::<u64>().map_err(|_| format!("amount must be an integer, got {amount:?}"))?;
+            let nonce = nonce_for(options, &client, &signer.neuron)?;
+            signer.transfer(&chain, nonce, options.token(), amount, wallet::card(to), fee)
+        }
+        ["link", p, q] => {
+            let nonce = nonce_for(options, &client, &signer.neuron)?;
+            let amount = options.u64("--amount")?.unwrap_or(0);
+            signer.cyberlink(&chain, nonce, wallet::card(p), wallet::card(q), valence(options)?, options.token(), amount, fee)
+        }
+        ["claim"] => {
+            let nonce = nonce_for(options, &client, &signer.neuron)?;
+            signer.claim(&chain, nonce, fee)
+        }
+        _ => return Err("cyber tx transfer TO AMOUNT | link P Q | claim | show TXID".into()),
     }
-    let mut client = Client::open(&home)?;
-    match words.as_slice() {
-        [] | ["status"] => client.status(&home),
-        ["neuron", tail @ ..] => {
-            println!("{}", client.host.execute(&client.registry, tail)?);
-            Ok(())
-        }
-        ["sync"] => {
-            let mut transport = options.endpoint()?;
-            println!(
-                "{} endpoint observations retained; local projection, not consensus finality",
-                client.sync(&mut transport)?
-            );
-            Ok(())
-        }
-        ["relay"] => {
-            let a = client.attachment(&options)?;
-            let mut transport = options.endpoint()?;
-            println!(
-                "{} original requests accepted",
-                client.relay(a.id, &mut transport)?
-            );
-            client.sync(&mut transport)?;
-            Ok(())
-        }
-        ["receipt", request] => {
-            let request = parse_id(request)?;
-            let mut transport = options.endpoint()?;
-            let receipt =
-                client
-                    .registry
-                    .deliver_native(request, None, transport.network, &mut transport)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&receipt.value).map_err(error)?
-            );
-            Ok(())
-        }
-        ["link", from, to] => client.link(&options, from, to),
-        _ => unreachable!(),
+    .map_err(error)?;
+    send(options, &client, signed)
+}
+
+fn neuron_command(options: &Options, words: &[&str]) -> Result<()> {
+    if words == ["new"] {
+        let path = spell::path(options.value("--spell"), options.value("--home"))?;
+        let words = Signer::generate_spell().map_err(error)?;
+        spell::write_new(&path, &words)?;
+        println!("minted {}", path.display());
+    }
+    let signer = options.signer()?;
+    let v = json!({
+        "neuron": signer.neuron_hex(),
+        "pubkey": hex(&signer.pubkey),
+        "account_id": hex(&signer.account_id),
+        "address": signer.address(options.hrp()).map_err(error)?,
+        "legacy_owner": hex(&signer.legacy_owner(options.hrp())),
+        "spell": spell::path(options.value("--spell"), options.value("--home"))?,
+    });
+    println!("{}", serde_json::to_string_pretty(&v).map_err(error)?);
+    Ok(())
+}
+
+fn owner_arg(options: &Options, arg: Option<&&str>) -> Result<[u8; 32]> {
+    match arg {
+        Some(s) => Ok(wallet::card(s)),
+        None => Ok(options.signer()?.neuron),
     }
 }
+
+fn run(options: Options) -> Result<()> {
+    let words: Vec<&str> = options.words.iter().map(String::as_str).collect();
+    if options.on("--help") || matches!(words.as_slice(), ["help" | "-h" | "?"]) {
+        print!("{}", include_str!("help.txt"));
+        return Ok(());
+    }
+    if options.on("--version") || matches!(words.as_slice(), ["version" | "-V"]) {
+        println!("cyber {} (true-cyber) · soft3 {} · chain soft3/chain/1", env!("CARGO_PKG_VERSION"), soft3::VERSION);
+        return Ok(());
+    }
+    match words.as_slice() {
+        [] | ["status"] => {
+            let s = options.client()?.status().map_err(error)?;
+            if options.on("--json") {
+                let fields: serde_json::Map<String, Value> =
+                    s.fields.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+                println!("{}", serde_json::to_string_pretty(&json!({
+                    "schema": "cyber/status/1", "rpc": options.rpc(), "chain": s.chain,
+                    "chain_id": s.chain_id.map(|c| hex(&c)), "height": s.height, "tip": s.tip,
+                    "root": s.root, "catching_up": s.catching_up, "fields": fields,
+                })).map_err(error)?);
+            } else {
+                println!("chain      {}", s.chain);
+                println!("chain-id   {}", s.chain_id.map(|c| hex(&c)).unwrap_or_else(|| "(not published)".into()));
+                println!("height     {}", s.height);
+                println!("tip        {}", s.tip);
+                println!("root       {}", s.root);
+                println!("catching   {}", s.catching_up);
+                for key in ["protocol", "rule-set", "chainwork", "bits", "supply", "conserved", "mempool", "peers", "mining"] {
+                    if let Some(v) = s.field(key) {
+                        println!("{key:<10} {v}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        ["balance", rest @ ..] => {
+            let client = options.client()?;
+            let owner = owner_arg(&options, rest.first())?;
+            let token = options.value("--token").map(wallet::token_arg);
+            let balance = client.balance(&owner, token.as_ref()).map_err(error)?;
+            if options.on("--json") {
+                println!("{}", json!({"owner": hex(&owner), "token": token.map(|t| hex(&t)), "balance": balance}));
+            } else {
+                println!("{balance}");
+            }
+            Ok(())
+        }
+        ["balances", rest @ ..] => {
+            let owner = owner_arg(&options, rest.first())?;
+            print!("{}", options.client()?.balances(&owner).map_err(error)?);
+            Ok(())
+        }
+        ["nonce", rest @ ..] => {
+            let neuron = owner_arg(&options, rest.first())?;
+            println!("{}", options.client()?.nonce(&neuron).map_err(error)?);
+            Ok(())
+        }
+        ["tip"] => {
+            println!("{}", serde_json::to_string_pretty(&options.client()?.tip().map_err(error)?).map_err(error)?);
+            Ok(())
+        }
+        ["block", which] => {
+            println!("{}", serde_json::to_string_pretty(&options.client()?.block(which).map_err(error)?).map_err(error)?);
+            Ok(())
+        }
+        ["history"] => {
+            let after = options.u64("--after")?;
+            let limit = options.u64("--limit")?.unwrap_or(16);
+            println!("{}", serde_json::to_string_pretty(&options.client()?.history(after, limit).map_err(error)?).map_err(error)?);
+            Ok(())
+        }
+        ["tx", rest @ ..] => tx_command(&options, rest),
+        ["neuron", rest @ ..] => neuron_command(&options, rest),
+        ["fees"] => {
+            for k in [Kind::Transfer, Kind::Cyberlink, Kind::Claim] {
+                println!("{:<10} {:>3} bytes  fee floor {}", k.name(), k.total_bytes(), k.min_fee());
+            }
+            Ok(())
+        }
+        _ => Err("unknown command or missing arguments; cyber help".into()),
+    }
+}
+
 fn main() {
     if let Err(e) = Options::parse(std::env::args().skip(1)).and_then(run) {
         eprintln!("cyber: {e}");

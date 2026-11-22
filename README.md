@@ -7,6 +7,37 @@ alias: cyber cli, true-cyber
 ---
 # true-cyber
 
+The network repository of cyber, the network of CYB: its genesis and its configuration, the input [cybernode](https://github.com/cyberia-to/cybernode) takes to run it. Beside them stand the network's site and its documents. The repository also still carries `cyber`, the command line of a neuron.
+
+cyber is the third network and arrives last, after [space-pussy](https://github.com/cyberia-to/space-pussy) and [bostrom](https://github.com/cyberia-to/bostrom) have proven the machine. It buries no chain: it starts empty, reads the proven states of the two, and mints CYB by claims — every TOCYB of bostrom becomes 666 CYB.
+
+## what is here
+
+| path | what it is |
+|---|---|
+| [network.toml](network.toml) | the network's identity and rules, as far as they are decided: the name, the coin, claims only, the cap and the schedule of emission |
+| [genesis/](genesis/) | how block 0 is made: the states it reads, the claims, the empty graph, and the lock, not built yet |
+| [endpoints.toml](endpoints.toml) | where the network is met: the site |
+| [site/](site/) | [cyb.money](https://cyb.money): one page, static, no build |
+| [audit/](audit/) | receipts |
+| [docs/](docs/) | the history, the economy of CYB, what can be run |
+| `src/`, `tests/`, `Cargo.toml` | the client `cyber`, until it moves to cybernode |
+
+The layout is the standard of a network repository, cybernode [`specs/network.md`](https://github.com/cyberia-to/cybernode/blob/main/specs/network.md).
+
+## where it stands
+
+Nothing of cyber runs. The network is not launched, the node knows no network by this name, the claim program is not specified, and the genesis is not built: the lock is empty and says so. What is decided is in `network.toml`; what is proposed and what is open is in [the economy of CYB](docs/economics.md). The phase that makes this repository the node's input is N4 of [networks as repositories](https://github.com/cyberia-to/soft3/blob/release/phase1/projects/network-repos.md).
+
+| | |
+|---|---|
+| the coin | cyb |
+| the cap | 18,446,744,069,414,584,321, the order of the Goldilocks field |
+| claimable at genesis | 187,416,084,623,451,570 CYB, about 1 % of the cap |
+| the graph at genesis | empty |
+
+## the client
+
 `cyber` is the command line of the phase-1 root chain
 ([soft3/specs/chain.md](../soft3/specs/chain.md)): the three things a neuron
 can do — transfer, cyberlink, claim — signed with the key your spell derives
